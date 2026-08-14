@@ -7,7 +7,7 @@
     "compile": "tsc --noEmit",
     "lint": "eslint . --cache --fix --max-warnings 0",
     "format": "bun x prettier --write .",
-    "test": "vitest run"
+    "test": "bun --bun vitest run"
   },
   "dependencies": {
     "@traycer/protocol": "workspace:*",
@@ -16,6 +16,7 @@
   "devDependencies": {
     "@typescript-eslint/eslint-plugin": "catalog:",
     "@typescript-eslint/parser": "catalog:",
+    "@types/bun": "catalog:",
     "@types/node": "catalog:",
     "eslint": "catalog:",
     "typescript": "catalog:",
