@@ -2,7 +2,7 @@ import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { Recorder } from "./recorder";
 import { buildProxyPidMetadata, isValidLocalHostWebsocketUrl, swapPidFile } from "./pid-impersonation";
-import { startProxyServer, type ProxyServer } from "./proxy-server";
+import { startProxyServer, type ProxyServer, type ProxyStats } from "./proxy-server";
 import { createShutdownHandler } from "./shutdown";
 
 type RealMetadata = {
@@ -38,6 +38,22 @@ export async function readRealMetadata(pidFile: string): Promise<RealMetadata> {
 }
 
 /**
+ * One line the operator sees on Ctrl-C. Without it an empty or half-empty
+ * recording is only discoverable by opening the file, and the silent drop
+ * path (frames the upstream socket could not accept) leaves no trace in the
+ * summary at all.
+ */
+export function formatSessionSummary(input: {
+  readonly stats: ProxyStats;
+  readonly outPath: string;
+}): string {
+  return (
+    `capture-proxy stopped: ${input.stats.recorded} frame(s) recorded, ` +
+    `${input.stats.dropped} dropped -> ${input.outPath}`
+  );
+}
+
+/**
  * Wires the shared shutdown routine to every exit path that can occur once
  * pid.json has been swapped to point at the proxy:
  *  - SIGINT / SIGTERM (operator stops the proxy)
@@ -53,6 +69,7 @@ function installShutdownHandlers(deps: {
   readonly restore: () => Promise<void>;
   readonly proxy: ProxyServer;
   readonly recorder: Recorder;
+  readonly outPath: string;
 }): void {
   const shutdown = createShutdownHandler({
     restore: deps.restore,
@@ -65,6 +82,16 @@ function installShutdownHandlers(deps: {
 
   const shutdownAndExit = (code: number): void => {
     void shutdown().then(() => {
+      // Read the counters after the recorder is closed, so in-flight appends
+      // have settled and the number reported is the number on disk. A failed
+      // write here (e.g. a closed stdout) must not stop the process exiting.
+      try {
+        process.stdout.write(
+          `${formatSessionSummary({ stats: deps.proxy.stats(), outPath: deps.outPath })}\n`,
+        );
+      } catch {
+        // stdout is gone; the recording is already flushed either way.
+      }
       process.exit(code);
     });
   };
@@ -132,7 +159,7 @@ async function run(): Promise<void> {
         `upstream ${real.rpcUrl}\nrecording -> ${out}\nCtrl-C to stop\n`,
     );
 
-    installShutdownHandlers({ restore, proxy, recorder });
+    installShutdownHandlers({ restore, proxy, recorder, outPath: out });
   } catch (error) {
     if (restore !== null) {
       await restore();

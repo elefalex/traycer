@@ -97,6 +97,11 @@ describe("startProxyServer", () => {
     expect(kinds).toContain("open");
     expect(kinds).toContain("openAck");
     expect(kinds).toContain("response");
+
+    // The end-of-session summary is only honest if the counter matches what
+    // actually landed on disk.
+    expect(proxy.stats().recorded).toBe(lines.length);
+    expect(proxy.stats().dropped).toBe(0);
   });
 
   // The probe in clients/shared/host-client/host-activity-probe.ts calls
@@ -417,6 +422,10 @@ describe("startProxyServer", () => {
     // not be recorded as if it were successfully forwarded.
     expect(c2hFrames.map((f) => f.payload)).toEqual(["first"]);
     expect(upstreamReceived).toEqual(["first"]);
+
+    // The recorded counter behind the end-of-session summary must not count
+    // a frame that was never written.
+    expect(proxy.stats().recorded).toBe(frames.length);
   });
 
   it("closes the dialed upstream socket and stays healthy after a failed /rpc upgrade", async () => {

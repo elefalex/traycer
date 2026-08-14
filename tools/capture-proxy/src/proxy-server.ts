@@ -2,7 +2,22 @@ import type { ServerWebSocket } from "bun";
 import { classifyFrame } from "./frame-classifier";
 import type { Recorder } from "./recorder";
 
-export type ProxyServer = { port: number; stop: () => Promise<void> };
+/**
+ * Counters behind the end-of-session summary. `recorded` counts frames that
+ * actually reached the recording file (an append that rejected is not one);
+ * `dropped` counts client frames the upstream socket could not accept, which
+ * are deliberately neither forwarded nor recorded.
+ */
+export type ProxyStats = {
+  readonly recorded: number;
+  readonly dropped: number;
+};
+
+export type ProxyServer = {
+  port: number;
+  stats: () => ProxyStats;
+  stop: () => Promise<void>;
+};
 
 type Leg = "rpc" | "stream";
 type ConnState = {
@@ -20,6 +35,8 @@ export async function startProxyServer(input: {
   recorder: Recorder;
   port: number;
 }): Promise<ProxyServer> {
+  let recordedCount = 0;
+  let droppedCount = 0;
   const record = (
     connId: string,
     leg: Leg,
@@ -48,12 +65,17 @@ export async function startProxyServer(input: {
     // Fire-and-forget, but never unhandled: a rejected append (disk error,
     // or a write-after-close race with recorder.close()) must drop only
     // this one frame from the recording, never crash the proxy process.
-    input.recorder.append(frame).catch((err: unknown) => {
-      console.error(
-        `[capture-proxy] failed to record frame connId=${connId} leg=${leg} direction=${direction} kind=${frame.kind}:`,
-        err,
-      );
-    });
+    input.recorder.append(frame).then(
+      () => {
+        recordedCount += 1;
+      },
+      (err: unknown) => {
+        console.error(
+          `[capture-proxy] failed to record frame connId=${connId} leg=${leg} direction=${direction} kind=${frame.kind}:`,
+          err,
+        );
+      },
+    );
   };
 
   const server = Bun.serve<ConnState>({
@@ -114,6 +136,7 @@ export async function startProxyServer(input: {
           // the frame. Recording it as forwarded here would misrepresent
           // a dropped frame as delivered, so it is neither recorded nor
           // buffered.
+          droppedCount += 1;
           console.error(
             `[capture-proxy] dropping c2h frame for connId=${state.connId} leg=${state.leg}: upstream readyState=${readyState}`,
           );
@@ -140,6 +163,7 @@ export async function startProxyServer(input: {
 
   return {
     port,
+    stats: () => ({ recorded: recordedCount, dropped: droppedCount }),
     stop: async () => {
       server.stop(true);
     },

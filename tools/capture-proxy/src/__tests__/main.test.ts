@@ -2,7 +2,7 @@ import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
-import { readRealMetadata } from "../main";
+import { formatSessionSummary, readRealMetadata } from "../main";
 
 let dir: string;
 beforeEach(async () => {
@@ -70,5 +70,25 @@ describe("readRealMetadata", () => {
     await writeFile(pidPath, JSON.stringify({ hostId: "real-host-1" }), "utf8");
 
     await expect(readRealMetadata(pidPath)).rejects.toThrow(/Malformed pid\.json/);
+  });
+});
+
+describe("formatSessionSummary", () => {
+  it("reports the recorded count, the dropped count and the output path", () => {
+    expect(
+      formatSessionSummary({
+        stats: { recorded: 128, dropped: 3 },
+        outPath: "recordings/boot.jsonl",
+      }),
+    ).toBe("capture-proxy stopped: 128 frame(s) recorded, 3 dropped -> recordings/boot.jsonl");
+  });
+
+  it("still names the output path when nothing was recorded", () => {
+    expect(
+      formatSessionSummary({
+        stats: { recorded: 0, dropped: 0 },
+        outPath: "recordings/empty.jsonl",
+      }),
+    ).toBe("capture-proxy stopped: 0 frame(s) recorded, 0 dropped -> recordings/empty.jsonl");
   });
 });
