@@ -23,6 +23,42 @@ function readSchemaVersion(
   return { major: rec.major, minor: rec.minor };
 }
 
+type ClassifyBinaryInput = {
+  readonly byteLength: number;
+  readonly connId: string;
+  readonly leg: "rpc" | "stream";
+  readonly direction: "c2h" | "h2c";
+  readonly ts: number;
+};
+
+/**
+ * Records the existence of a binary frame, never its contents.
+ *
+ * Binary payload bytes are opaque to `./scrub` (which walks JSON keys) and to
+ * the committed-fixture guard (`./__tests__/fixtures.test.ts`), so embedding
+ * them — base64 or otherwise — would carry un-scrubbable bytes past the last
+ * gate before a public fork. What a replay fixture needs from a binary frame
+ * is that one occurred here, in this order, this big; that is what is kept.
+ *
+ * `kind` is a free-form string already carrying sentinels for frames that have
+ * no wire `kind` of their own (`"unparseable"`, `"unknown"`), so `"binary"`
+ * joins them rather than changing `RecordedFrame`'s shape. The byte count
+ * rides in `payload` for the same reason: no new top-level field, and no
+ * consumer of the existing ones has to learn a new one.
+ */
+export function classifyBinaryFrame(input: ClassifyBinaryInput): RecordedFrame {
+  return {
+    ts: input.ts,
+    connId: input.connId,
+    leg: input.leg,
+    direction: input.direction,
+    kind: "binary",
+    method: null,
+    schemaVersion: null,
+    payload: { byteLength: input.byteLength },
+  };
+}
+
 export function classifyFrame(input: ClassifyInput): {
   frame: RecordedFrame;
   valid: boolean;

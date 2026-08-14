@@ -59,6 +59,14 @@ double as structured non-secrets on the real wire — `token: { vars: [...] }`
 lists credential ENV VAR NAMES and `apiKey: { supported, configured, source }`
 is key state, neither of which is a credential.
 
+**Binary frames are never scrubbed, because their content is never recorded.**
+The stream leg pairs a text envelope (`hasBinaryPayload: true`) with a binary
+frame carrying the payload. The proxy forwards those bytes byte-exact but
+records only `{"kind":"binary", ..., "payload":{"byteLength":N}}` — no content,
+in any encoding. Binary bytes are opaque to the scrubber and to the fixture
+guard, so recording them would carry un-scrubbable bytes past the last gate
+before a public fork.
+
 **Manual review item — `providers.setEnvOverride`.** Its request is
 `{ providerId, key, value }` (protocol `src/host/provider-schemas.ts`), where
 `key` NAMES the env var and `value` carries whatever the user pasted — an API

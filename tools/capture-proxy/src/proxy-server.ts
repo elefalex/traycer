@@ -1,6 +1,7 @@
 import type { ServerWebSocket } from "bun";
-import { classifyFrame } from "./frame-classifier";
+import { classifyBinaryFrame, classifyFrame } from "./frame-classifier";
 import type { Recorder } from "./recorder";
+import { toWireFrame, type WireFrame } from "./wire-frame";
 
 /**
  * Counters behind the end-of-session summary.
@@ -31,10 +32,29 @@ type ConnState = {
   connId: string;
   leg: Leg;
   upstream: WebSocket;
-  outbox: string[];
+  outbox: WireFrame[];
 };
 
 let connCounter = 0;
+
+/**
+ * Forwarding is a passthrough in both directions: a text frame goes out as the
+ * same string, a binary frame as the same bytes. Nothing is re-encoded, and in
+ * particular a binary frame is never routed through a string — see
+ * `./wire-frame` for what that would do to it.
+ */
+function sendToUpstream(socket: WebSocket, frame: WireFrame): void {
+  if (frame.type === "text") socket.send(frame.text);
+  else socket.send(frame.bytes);
+}
+
+function sendToClient(
+  socket: ServerWebSocket<ConnState>,
+  frame: WireFrame,
+): void {
+  if (frame.type === "text") socket.send(frame.text);
+  else socket.send(frame.bytes);
+}
 
 export async function startProxyServer(input: {
   upstreamRpcUrl: string;
@@ -48,15 +68,24 @@ export async function startProxyServer(input: {
     connId: string,
     leg: Leg,
     direction: "c2h" | "h2c",
-    raw: string,
+    wire: WireFrame,
   ): void => {
-    const { frame, valid } = classifyFrame({
-      raw,
-      connId,
-      leg,
-      direction,
-      ts: Date.now(),
-    });
+    const ts = Date.now();
+    // A binary frame has no JSON to parse and no schema to answer to: the
+    // transport validates it by its paired text envelope, not on its own.
+    const { frame, valid } =
+      wire.type === "binary"
+        ? {
+            frame: classifyBinaryFrame({
+              byteLength: wire.bytes.byteLength,
+              connId,
+              leg,
+              direction,
+              ts,
+            }),
+            valid: true,
+          }
+        : classifyFrame({ raw: wire.text, connId, leg, direction, ts });
     if (!valid) {
       // The whole reason this tool exists: the open repo's schemas are the
       // claim, the closed host's traffic is the evidence. A frame the
@@ -106,6 +135,10 @@ export async function startProxyServer(input: {
       const upstreamUrl =
         leg === "rpc" ? input.upstreamRpcUrl : input.upstreamStreamUrl;
       const upstream = new WebSocket(upstreamUrl);
+      // Pin the delivery shape of inbound binary frames: without this the
+      // socket may hand back a `Blob`, which cannot be read synchronously and
+      // so cannot be forwarded in order from `onmessage`.
+      upstream.binaryType = "arraybuffer";
       const state: ConnState = { connId, leg, upstream, outbox: [] };
       if (srv.upgrade(req, { data: state })) return undefined;
       // Upgrade failed (e.g. no Upgrade header): the outbound dial to the
@@ -117,13 +150,14 @@ export async function startProxyServer(input: {
       open(ws: ServerWebSocket<ConnState>) {
         const state = ws.data;
         state.upstream.onopen = () => {
-          for (const msg of state.outbox) state.upstream.send(msg);
+          for (const frame of state.outbox)
+            sendToUpstream(state.upstream, frame);
           state.outbox = [];
         };
         state.upstream.onmessage = (ev) => {
-          const raw = String(ev.data);
-          record(state.connId, state.leg, "h2c", raw);
-          ws.send(raw);
+          const frame = toWireFrame(ev.data);
+          record(state.connId, state.leg, "h2c", frame);
+          sendToClient(ws, frame);
         };
         // An upstream failure fires onerror and then onclose; this connection
         // is one truncated capture either way, not two.
@@ -151,7 +185,7 @@ export async function startProxyServer(input: {
       },
       message(ws: ServerWebSocket<ConnState>, msg) {
         const state = ws.data;
-        const raw = String(msg);
+        const frame = toWireFrame(msg);
         // Read the upstream socket's live readyState rather than a cached
         // boolean: a flag toggled from an onopen/onclose/onerror callback
         // can lag the socket's actual state by one event-loop turn (e.g.
@@ -177,9 +211,14 @@ export async function startProxyServer(input: {
           );
           return;
         }
-        record(state.connId, state.leg, "c2h", raw);
-        if (readyState === WebSocket.OPEN) state.upstream.send(raw);
-        else state.outbox.push(raw);
+        record(state.connId, state.leg, "c2h", frame);
+        if (readyState === WebSocket.OPEN)
+          sendToUpstream(state.upstream, frame);
+        // Safe to hold past this callback: `toWireFrame` already copied the
+        // bytes out of Bun's reusable receive buffer. Text and binary share one
+        // queue so the order the app sent them in — an envelope and the binary
+        // it pairs with — survives the flush.
+        else state.outbox.push(frame);
       },
       close(ws: ServerWebSocket<ConnState>) {
         try {

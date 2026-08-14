@@ -508,6 +508,184 @@ describe("startProxyServer", () => {
     expect(proxy.stats().recorded).toBe(frames.length);
   });
 
+  // The stream leg carries binary payloads paired with a text envelope that
+  // sets `hasBinaryPayload: true` (protocol
+  // `src/framework/stream-ws-protocol.ts`). Anything that routes those bytes
+  // through a text type destroys them: `String(buffer)` decodes as UTF-8 and
+  // substitutes U+FFFD for every byte that is not valid UTF-8, and the host
+  // answers the resulting garbage with STREAM_PROTOCOL_ERROR and tears the
+  // stream down under a live app. Every byte below is chosen to be either
+  // invalid UTF-8 (0xff, 0xfe, 0x80) or lost/altered by a text round-trip.
+  const CLIENT_BINARY = new Uint8Array([
+    0x89, 0x50, 0x4e, 0x47, 0x00, 0xff, 0xfe, 0x80, 0x0d, 0x0a, 0x7b, 0x7d,
+  ]);
+  const HOST_BINARY = new Uint8Array([
+    0x00, 0xff, 0xc0, 0xc1, 0xf5, 0x1b, 0x5c, 0x41, 0x00, 0x80,
+  ]);
+
+  it("forwards binary frames byte-exact in both directions", async () => {
+    const upstreamBinary: Uint8Array[] = [];
+    upstream = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        return new Response("no");
+      },
+      websocket: {
+        message(ws, msg) {
+          if (typeof msg === "string") return;
+          upstreamBinary.push(new Uint8Array(msg));
+          ws.send(HOST_BINARY);
+        },
+      },
+    });
+    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/stream`;
+    const recFile = join(dir, "binary.jsonl");
+    const recorder = new Recorder(recFile);
+    proxy = await startProxyServer({
+      upstreamRpcUrl: upstreamUrl.replace("/stream", "/rpc"),
+      upstreamStreamUrl: upstreamUrl,
+      recorder,
+      port: 0,
+    });
+
+    const clientBinary: Uint8Array[] = [];
+    const client = new WebSocket(`ws://127.0.0.1:${proxy.port}/stream`);
+    client.binaryType = "arraybuffer";
+    client.onopen = () => client.send(CLIENT_BINARY);
+    client.onmessage = (ev) => {
+      const data: unknown = ev.data;
+      if (data instanceof ArrayBuffer) clientBinary.push(new Uint8Array(data));
+    };
+
+    await waitFor(() => upstreamBinary.length >= 1 && clientBinary.length >= 1);
+    client.close();
+    await recorder.close();
+
+    // Byte content, not just length: a UTF-8 round-trip can preserve the byte
+    // count of some payloads while replacing their bytes, so a length-only
+    // assertion would pass against the broken path.
+    expect(Array.from(upstreamBinary[0])).toEqual(Array.from(CLIENT_BINARY));
+    expect(Array.from(clientBinary[0])).toEqual(Array.from(HOST_BINARY));
+  });
+
+  it("records a binary frame as kind 'binary' with its byte length and no payload content", async () => {
+    upstream = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        return new Response("no");
+      },
+      websocket: {
+        message(ws, msg) {
+          if (typeof msg !== "string") ws.send(HOST_BINARY);
+        },
+      },
+    });
+    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/stream`;
+    const recFile = join(dir, "binary-record.jsonl");
+    const recorder = new Recorder(recFile);
+    proxy = await startProxyServer({
+      upstreamRpcUrl: upstreamUrl.replace("/stream", "/rpc"),
+      upstreamStreamUrl: upstreamUrl,
+      recorder,
+      port: 0,
+    });
+
+    let hostFrames = 0;
+    const client = new WebSocket(`ws://127.0.0.1:${proxy.port}/stream`);
+    client.binaryType = "arraybuffer";
+    client.onopen = () => client.send(CLIENT_BINARY);
+    client.onmessage = () => {
+      hostFrames += 1;
+    };
+
+    await waitFor(() => hostFrames >= 1);
+    client.close();
+    await recorder.close();
+
+    const text = await readFile(recFile, "utf8");
+    const frames = text
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const c2h = frames.find((f) => f.direction === "c2h");
+    const h2c = frames.find((f) => f.direction === "h2c");
+
+    expect(c2h.kind).toBe("binary");
+    expect(c2h.method).toBeNull();
+    expect(c2h.schemaVersion).toBeNull();
+    // Byte length only. Binary payload content is opaque to src/scrub.ts and
+    // to the fixture guard, so embedding it (base64 or otherwise) would
+    // smuggle un-scrubbable bytes past the last gate before a public fork.
+    expect(c2h.payload).toEqual({ byteLength: CLIENT_BINARY.byteLength });
+    expect(h2c.kind).toBe("binary");
+    expect(h2c.payload).toEqual({ byteLength: HOST_BINARY.byteLength });
+
+    // Nothing resembling the bytes themselves reached the recording, in any
+    // encoding: neither base64 nor a UTF-8 decode of them appears on disk.
+    expect(text).not.toContain(Buffer.from(CLIENT_BINARY).toString("base64"));
+    expect(text).not.toContain(Buffer.from(HOST_BINARY).toString("base64"));
+  });
+
+  it("flushes buffered text and binary frames byte-exact and in order", async () => {
+    const upstreamReceived: Array<
+      { type: "text"; value: string } | { type: "binary"; value: number[] }
+    > = [];
+    upstream = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        return new Response("no");
+      },
+      websocket: {
+        message(_ws, msg) {
+          if (typeof msg === "string") {
+            upstreamReceived.push({ type: "text", value: msg });
+            return;
+          }
+          upstreamReceived.push({
+            type: "binary",
+            value: Array.from(new Uint8Array(msg)),
+          });
+        },
+      },
+    });
+    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/stream`;
+    const recorder = new Recorder(join(dir, "binary-order.jsonl"));
+    proxy = await startProxyServer({
+      upstreamRpcUrl: upstreamUrl.replace("/stream", "/rpc"),
+      upstreamStreamUrl: upstreamUrl,
+      recorder,
+      port: 0,
+    });
+
+    const client = new WebSocket(`ws://127.0.0.1:${proxy.port}/stream`);
+    client.onopen = () => {
+      // Sent before the proxy's own upstream socket can have finished
+      // connecting, so all three take the buffer-until-open path. The real
+      // stream protocol pairs an envelope with the binary that follows it, so
+      // a buffered binary frame that loses its bytes or its place in the
+      // sequence breaks the pairing just as badly as a dropped frame.
+      client.send("envelope-before");
+      client.send(CLIENT_BINARY);
+      client.send("envelope-after");
+    };
+
+    await waitFor(() => upstreamReceived.length >= 3);
+    client.close();
+    await recorder.close();
+
+    expect(upstreamReceived).toEqual([
+      { type: "text", value: "envelope-before" },
+      { type: "binary", value: Array.from(CLIENT_BINARY) },
+      { type: "text", value: "envelope-after" },
+    ]);
+  });
+
   it("closes the dialed upstream socket and stays healthy after a failed /rpc upgrade", async () => {
     upstream = Bun.serve({
       port: 0,
