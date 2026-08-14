@@ -79,7 +79,7 @@ describe("formatSessionSummary", () => {
   it("reports how many frames were written to the recording, and the output path", () => {
     expect(
       formatSessionSummary({
-        stats: { recorded: 128, truncatedConnections: 0 },
+        stats: { recorded: 128, truncatedStreamConnections: 0 },
         outPath: "recordings/boot.jsonl",
       }),
     ).toBe(
@@ -90,7 +90,7 @@ describe("formatSessionSummary", () => {
   it("still names the output path when nothing was recorded", () => {
     expect(
       formatSessionSummary({
-        stats: { recorded: 0, truncatedConnections: 0 },
+        stats: { recorded: 0, truncatedStreamConnections: 0 },
         outPath: "recordings/empty.jsonl",
       }),
     ).toBe(
@@ -98,12 +98,14 @@ describe("formatSessionSummary", () => {
     );
   });
 
-  // The signal the operator actually needs: an upstream host socket that went
-  // away while the app was still connected means the tail of that session was
-  // never captured, and the recording is not a complete session.
-  it("warns that the capture may be truncated when upstream was lost mid-session", () => {
+  // The signal the operator actually needs: a long-lived STREAM socket whose
+  // upstream host went away while the app was still connected means the tail
+  // of that session was never captured, and the recording is not a complete
+  // session. The wording says "stream connection(s)" because that is all the
+  // counter behind it covers - see ProxyStats.
+  it("warns that the capture may be truncated when a stream lost upstream mid-session", () => {
     const summary = formatSessionSummary({
-      stats: { recorded: 128, truncatedConnections: 2 },
+      stats: { recorded: 128, truncatedStreamConnections: 2 },
       outPath: "recordings/boot.jsonl",
     });
 
@@ -111,14 +113,14 @@ describe("formatSessionSummary", () => {
       "capture-proxy stopped: 128 frame(s) written to recordings/boot.jsonl",
     );
     expect(summary).toMatch(/WARNING/);
-    expect(summary).toMatch(/2 connection\(s\)/);
+    expect(summary).toMatch(/2 stream connection\(s\)/);
     expect(summary).toMatch(/truncated/);
   });
 
-  it("says nothing about truncation when every connection outlived its upstream", () => {
+  it("says nothing about truncation when every stream outlived its upstream", () => {
     expect(
       formatSessionSummary({
-        stats: { recorded: 12, truncatedConnections: 0 },
+        stats: { recorded: 12, truncatedStreamConnections: 0 },
         outPath: "recordings/warm.jsonl",
       }),
     ).not.toMatch(/WARNING/);

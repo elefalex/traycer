@@ -58,22 +58,25 @@ export async function readRealMetadata(pidFile: string): Promise<RealMetadata> {
  * received any of it.
  *
  * The truncation warning is the one completeness claim that can be made
- * honestly, because losing an upstream socket under a live client leg is an
- * event the proxy observes directly.
+ * honestly, because losing an upstream STREAM socket under a live client leg
+ * is an event the proxy observes directly. It is worded for the stream leg
+ * because that is all it counts: on the rpc leg — one socket per unary
+ * request — the host closing after it answers is the normal end of every
+ * successful call, so the same signal there means nothing.
  */
 export function formatSessionSummary(input: {
   readonly stats: ProxyStats;
   readonly outPath: string;
 }): string {
   const summary = `capture-proxy stopped: ${input.stats.recorded} frame(s) written to ${input.outPath}`;
-  if (input.stats.truncatedConnections === 0) {
+  if (input.stats.truncatedStreamConnections === 0) {
     return summary;
   }
   return (
     `${summary}\n` +
-    `WARNING: ${input.stats.truncatedConnections} connection(s) lost the upstream host while the app was ` +
-    `still connected - this capture is truncated and must not be trusted as a complete session. Restart ` +
-    `the host and redo the run.`
+    `WARNING: ${input.stats.truncatedStreamConnections} stream connection(s) lost the upstream host while ` +
+    `the app was still connected - this capture is truncated and must not be trusted as a complete ` +
+    `session. Restart the host and redo the run.`
   );
 }
 

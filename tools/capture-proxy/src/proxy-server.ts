@@ -12,13 +12,20 @@ import { toWireFrame, type WireFrame } from "./wire-frame";
  * recorded but silently not delivered, and this proxy cannot tell the
  * difference without redesigning the send path.
  *
- * `truncatedConnections` counts connections whose upstream host socket closed
- * while the client leg was still open. Each one means the tail of that
- * session was never seen, so the recording is not a complete session.
+ * `truncatedStreamConnections` counts STREAM connections whose upstream host
+ * socket closed while the client leg was still open. Each one means the tail
+ * of that stream was never seen, so the recording is not a complete session.
+ *
+ * The rpc leg is deliberately excluded, and the counter is named for the leg
+ * it covers so it cannot be read as a claim about both. `/rpc` is one socket
+ * per unary request: the host answers and then closes, which is the normal end
+ * of every successful call and arrives while the client leg is still open. A
+ * genuinely truncated rpc call needs no counter — it is already in the
+ * recording as a request with no matching response.
  */
 export type ProxyStats = {
   readonly recorded: number;
-  readonly truncatedConnections: number;
+  readonly truncatedStreamConnections: number;
 };
 
 export type ProxyServer = {
@@ -63,7 +70,7 @@ export async function startProxyServer(input: {
   port: number;
 }): Promise<ProxyServer> {
   let recordedCount = 0;
-  let truncatedConnections = 0;
+  let truncatedStreamConnections = 0;
   const record = (
     connId: string,
     leg: Leg,
@@ -163,19 +170,27 @@ export async function startProxyServer(input: {
         // is one truncated capture either way, not two.
         let countedTruncation = false;
         const onUpstreamGone = (): void => {
-          // Upstream closing while the client leg is still open means the
-          // host went away under a live app (crash, update, restart): from
-          // here on nothing more of that session can be captured, so the
-          // recording holds only its beginning. The ordinary teardown is the
-          // other order — the app disconnects, then `close()` below tears
-          // the upstream socket down — and by then this socket is no longer
-          // OPEN, so it is not counted.
-          if (!countedTruncation && ws.readyState === WebSocket.OPEN) {
+          // Stream connections only. On the stream leg the socket is
+          // long-lived, so upstream closing under a still-open client leg
+          // means the host went away mid-session (crash, update, restart) and
+          // nothing after that point was captured. On the rpc leg the same
+          // event is the normal end of every unary call — the host answers
+          // and hangs up — so counting it there reports every healthy request
+          // as a truncated capture.
+          //
+          // The ordinary end of a stream is the other order: the app
+          // disconnects, then `close()` below tears the upstream socket down,
+          // and by then this socket is no longer OPEN, so it is not counted.
+          if (
+            state.leg === "stream" &&
+            !countedTruncation &&
+            ws.readyState === WebSocket.OPEN
+          ) {
             countedTruncation = true;
-            truncatedConnections += 1;
+            truncatedStreamConnections += 1;
             console.error(
               `[capture-proxy] upstream closed while the client was still connected ` +
-                `connId=${state.connId} leg=${state.leg}: the capture of this connection is truncated`,
+                `connId=${state.connId} leg=${state.leg}: the capture of this stream is truncated`,
             );
           }
           ws.close();
@@ -237,7 +252,7 @@ export async function startProxyServer(input: {
 
   return {
     port,
-    stats: () => ({ recorded: recordedCount, truncatedConnections }),
+    stats: () => ({ recorded: recordedCount, truncatedStreamConnections }),
     stop: async () => {
       server.stop(true);
     },

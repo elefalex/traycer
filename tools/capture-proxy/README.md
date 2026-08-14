@@ -30,9 +30,12 @@ real signed host, to produce replay fixtures for the open host.
 4. Let the relaunched app reach the idle window, then Ctrl-C the proxy. It
    prints how many frames it wrote to the recording — a suspiciously small
    count means the app never came through the proxy, so redo the run. It also
-   prints a WARNING if any connection lost the upstream host while the app was
-   still connected: that capture is truncated (the host restarted or crashed
-   mid-run) and should be redone rather than committed.
+   prints a WARNING if any **stream** connection lost the upstream host while
+   the app was still connected: that capture is truncated (the host restarted
+   or crashed mid-run) and should be redone rather than committed. The rpc leg
+   is not counted — it is one socket per unary request, so the host closing
+   after it answers is the normal end of every successful call; a truncated
+   rpc call shows up in the recording as a request with no matching response.
    - If the app connects straight back to the real host instead of the
      proxy, it did not observe the pid.json swap: macOS FSEvents coalesces
      and can drop the create event for a rename-replace (documented at

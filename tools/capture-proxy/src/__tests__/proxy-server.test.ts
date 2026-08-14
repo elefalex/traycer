@@ -106,11 +106,12 @@ describe("startProxyServer", () => {
     expect(proxy.stats().recorded).toBe(lines.length);
   });
 
-  // The summary's only claim about capture completeness. It must fire when
-  // the host socket goes away under a still-connected app (the tail of that
-  // session was never seen) and must NOT fire on the ordinary teardown where
-  // the app disconnects first.
-  it("counts a connection as truncated when upstream closes while the client is still connected", async () => {
+  // The summary's only claim about capture completeness, and it is a claim
+  // about the STREAM leg. It must fire when a long-lived stream socket goes
+  // away under a still-connected app (the tail of that session was never
+  // seen) and must NOT fire on the ordinary teardown where the app
+  // disconnects first, nor on the rpc leg at all.
+  it("counts a stream connection as truncated when upstream closes while the client is still connected", async () => {
     upstream = Bun.serve({
       port: 0,
       hostname: "127.0.0.1",
@@ -126,8 +127,61 @@ describe("startProxyServer", () => {
         },
       },
     });
-    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/rpc`;
+    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/stream`;
     const recorder = new Recorder(join(dir, "truncated.jsonl"));
+    proxy = await startProxyServer({
+      upstreamRpcUrl: upstreamUrl.replace("/stream", "/rpc"),
+      upstreamStreamUrl: upstreamUrl,
+      recorder,
+      port: 0,
+    });
+
+    const client = new WebSocket(`ws://127.0.0.1:${proxy.port}/stream`);
+    client.onopen = () => client.send("hello");
+
+    const started = proxy;
+    await waitFor(() => started.stats().truncatedStreamConnections >= 1);
+    client.close();
+    await recorder.close();
+
+    expect(proxy.stats().truncatedStreamConnections).toBe(1);
+  });
+
+  // The /rpc leg is one socket per unary request: the host answers, then
+  // closes. That close lands while the client leg is still open, so counting
+  // it as truncation flags every ordinary successful call — 81 warnings on a
+  // clean boot capture, declaring a good recording untrustworthy. A genuinely
+  // truncated rpc call is already visible in the recording as a request with
+  // no matching response.
+  it("does not count the normal close of a unary /rpc call as truncation", async () => {
+    upstream = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        return new Response("no");
+      },
+      websocket: {
+        message(ws, msg) {
+          const frame = JSON.parse(String(msg));
+          ws.send(
+            JSON.stringify({
+              kind: "response",
+              requestId: frame.requestId,
+              method: frame.method,
+              schemaVersion: frame.schemaVersion,
+              result: { ok: true },
+              error: null,
+            }),
+          );
+          // The unary lifecycle: answer, then hang up. The app is still on the
+          // other leg when this arrives.
+          ws.close();
+        },
+      },
+    });
+    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/rpc`;
+    const recorder = new Recorder(join(dir, "unary-rpc.jsonl"));
     proxy = await startProxyServer({
       upstreamRpcUrl: upstreamUrl,
       upstreamStreamUrl: upstreamUrl.replace("/rpc", "/stream"),
@@ -135,18 +189,29 @@ describe("startProxyServer", () => {
       port: 0,
     });
 
+    const received: unknown[] = [];
     const client = new WebSocket(`ws://127.0.0.1:${proxy.port}/rpc`);
-    client.onopen = () => client.send("hello");
+    client.onopen = () =>
+      client.send(
+        JSON.stringify({
+          kind: "request",
+          requestId: "r1",
+          method: "host.status",
+          schemaVersion: { major: 1, minor: 0 },
+          params: {},
+        }),
+      );
+    client.onmessage = (ev) => received.push(JSON.parse(String(ev.data)));
 
-    const started = proxy;
-    await waitFor(() => started.stats().truncatedConnections >= 1);
+    await waitFor(() => received.length >= 1);
+    await new Promise((resolve) => setTimeout(resolve, 200));
     client.close();
     await recorder.close();
 
-    expect(proxy.stats().truncatedConnections).toBe(1);
+    expect(proxy.stats().truncatedStreamConnections).toBe(0);
   });
 
-  it("does not count a truncated connection when the client disconnects first", async () => {
+  it("does not count a truncated stream when the client disconnects first", async () => {
     const upstreamReceived: string[] = [];
     upstream = Bun.serve({
       port: 0,
@@ -161,16 +226,16 @@ describe("startProxyServer", () => {
         },
       },
     });
-    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/rpc`;
+    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/stream`;
     const recorder = new Recorder(join(dir, "clean-close.jsonl"));
     proxy = await startProxyServer({
-      upstreamRpcUrl: upstreamUrl,
-      upstreamStreamUrl: upstreamUrl.replace("/rpc", "/stream"),
+      upstreamRpcUrl: upstreamUrl.replace("/stream", "/rpc"),
+      upstreamStreamUrl: upstreamUrl,
       recorder,
       port: 0,
     });
 
-    const client = new WebSocket(`ws://127.0.0.1:${proxy.port}/rpc`);
+    const client = new WebSocket(`ws://127.0.0.1:${proxy.port}/stream`);
     client.onopen = () => client.send("hello");
     await waitFor(() => upstreamReceived.includes("hello"));
 
@@ -181,7 +246,7 @@ describe("startProxyServer", () => {
     await new Promise((resolve) => setTimeout(resolve, 300));
     await recorder.close();
 
-    expect(proxy.stats().truncatedConnections).toBe(0);
+    expect(proxy.stats().truncatedStreamConnections).toBe(0);
   });
 
   // The probe in clients/shared/host-client/host-activity-probe.ts calls
