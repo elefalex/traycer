@@ -7,7 +7,7 @@ function scrubValue(value: unknown, keyName: string, homeDir: string): unknown {
     return homeDir.length > 0 ? value.split(homeDir).join("<home>") : value;
   }
   if (Array.isArray(value)) {
-    return value.map((item) => scrubValue(item, "", homeDir));
+    return value.map((item) => scrubValue(item, keyName, homeDir));
   }
   if (value !== null && typeof value === "object") {
     const out: Record<string, unknown> = {};

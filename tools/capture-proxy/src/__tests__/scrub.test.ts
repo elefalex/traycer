@@ -212,5 +212,93 @@ describe("scrubFrame", () => {
     const items = payload2.items as Array<Record<string, unknown>>;
     expect(items[0].token).toBe("<redacted-token>");
     expect(items[0].path).toBe("<home>/data");
+
+    // Blanket assertion: no raw secret strings should survive
+    expect(outContent).not.toContain("secret-token-123");
+    expect(outContent).not.toContain("nested-secret");
+  });
+
+  it("redacts tokens that are array values under a token key", () => {
+    const frame: RecordedFrame = {
+      ...base,
+      payload: {
+        token: ["secret-jwt-1", "secret-jwt-2"],
+      },
+    };
+    const scrubbed = scrubFrame(frame, "/Users/alex");
+    const payload = scrubbed.payload as Record<string, unknown>;
+    const tokens = payload.token as string[];
+    expect(tokens[0]).toBe("<redacted-token>");
+    expect(tokens[1]).toBe("<redacted-token>");
+    // Blanket check: raw secrets must not appear in stringified output
+    const stringified = JSON.stringify(scrubbed.payload);
+    expect(stringified).not.toContain("secret-jwt-1");
+    expect(stringified).not.toContain("secret-jwt-2");
+  });
+
+  it("redacts tokens in nested arrays with mixed types", () => {
+    const frame: RecordedFrame = {
+      ...base,
+      payload: {
+        auth: {
+          token: ["a-secret", { inner: "not-a-token" }],
+        },
+      },
+    };
+    const scrubbed = scrubFrame(frame, "/Users/alex");
+    const payload = scrubbed.payload as Record<string, unknown>;
+    const auth = payload.auth as Record<string, unknown>;
+    const tokens = auth.token as Array<string | Record<string, unknown>>;
+    expect(tokens[0]).toBe("<redacted-token>");
+    const objElement = tokens[1] as Record<string, unknown>;
+    expect(objElement.inner).toBe("not-a-token");
+    // Blanket check: raw secret must not appear
+    const stringified = JSON.stringify(scrubbed.payload);
+    expect(stringified).not.toContain("a-secret");
+  });
+
+  it("scrubRecording redacts tokens in array values", async () => {
+    const inPath = join(tmpdir(), `scrub-array-input-${Date.now()}.jsonl`);
+    const outPath = join(tmpdir(), `scrub-array-output-${Date.now()}.jsonl`);
+
+    const frameWithTokenArray: RecordedFrame = {
+      ts: 1,
+      connId: "c1",
+      leg: "rpc",
+      direction: "c2h",
+      kind: "open",
+      method: null,
+      schemaVersion: null,
+      payload: {
+        kind: "open",
+        token: ["jwt-secret-1", "jwt-secret-2"],
+      },
+    };
+
+    await writeFile(
+      inPath,
+      `${JSON.stringify(frameWithTokenArray)}\n`,
+      "utf8"
+    );
+
+    await scrubRecording({
+      inPath,
+      outPath,
+      homeDir: "/Users/alex",
+    });
+
+    const outContent = await readFile(outPath, "utf8");
+    // Blanket assertion: no raw token values should survive in output
+    expect(outContent).not.toContain("jwt-secret-1");
+    expect(outContent).not.toContain("jwt-secret-2");
+    // Verify the tokens were redacted
+    const outLines = outContent
+      .split("\n")
+      .filter((line) => line.trim().length > 0);
+    const scrubbedFrame = JSON.parse(outLines[0]) as RecordedFrame;
+    const payload = scrubbedFrame.payload as Record<string, unknown>;
+    const tokens = payload.token as string[];
+    expect(tokens[0]).toBe("<redacted-token>");
+    expect(tokens[1]).toBe("<redacted-token>");
   });
 });
