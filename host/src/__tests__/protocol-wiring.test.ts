@@ -7,9 +7,21 @@
 // changed under this plan — do not edit the numbers to match; treat it as a
 // signal to stop and re-derive the manifest.
 //
-// - `hostRpcRegistry` / `hostStreamRpcRegistry`: protocol/src/host/index.ts
-//   (re-exported from protocol/src/host/registry.ts).
-// - `RELEASED_FLOOR_METHOD_NAMES`: protocol/src/host/released-floor.ts.
+// - `hostRpcRegistry`: protocol/src/host/registry.ts:7450-7454, built by
+//   `defineFloorAwareVersionedRpcRegistry(RELEASED_FLOOR_METHOD_NAMES,
+//   HOST_RPC_REGISTRY_DEFINITION)`. Re-exported from
+//   protocol/src/host/index.ts.
+// - `hostStreamRpcRegistry`: protocol/src/host/registry.ts:7944-7945, built
+//   by `defineVersionedStreamRpcRegistry(HOST_STREAM_RPC_REGISTRY_DEFINITION)`.
+//   Re-exported from protocol/src/host/index.ts.
+// - `RELEASED_FLOOR_METHOD_NAMES`: protocol/src/host/released-floor.ts:4.
+//
+// The third test below (floor-is-subset-of-registry) is not redundant with
+// module-load validation: `validateVersionedRpcRegistryDegrades`
+// (protocol/src/framework/versioned-rpc.ts:338-367) iterates
+// `Object.keys(registry)` and never iterates `floorMethodNames`, so a floor
+// name with no matching registry entry would slip past that check silently.
+// This test is the only place that walks the floor list itself.
 import { hostRpcRegistry, hostStreamRpcRegistry } from "@traycer/protocol/host";
 import { RELEASED_FLOOR_METHOD_NAMES } from "@traycer/protocol/host/released-floor";
 import { describe, expect, it } from "vitest";
