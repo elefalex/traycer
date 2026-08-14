@@ -298,6 +298,170 @@ describe("classifyFrame", () => {
     });
   });
 
+  // The /stream leg is a different wire contract from /rpc, and judging it by
+  // the /rpc envelope produced 224 bogus "frame rejected" warnings in a live
+  // capture - every one of them on leg=stream, none on leg=rpc. The stream leg
+  // is validated the way clients/shared/host-transport/ws-stream-client.ts
+  // validates it: several schemas tried in turn, not one union.
+  describe("stream leg", () => {
+    const details = {
+      code: "STREAM_PROTOCOL_ERROR",
+      reason: "nope",
+      incompatibleMethods: null,
+      upgradeGuidance: null,
+    };
+
+    function classifyStream(
+      payload: unknown,
+      direction: "c2h" | "h2c",
+    ): { valid: boolean; kind: string } {
+      const { frame, valid } = classifyFrame({
+        raw: JSON.stringify(payload),
+        connId: "c1",
+        leg: "stream",
+        direction,
+        ts: 100,
+      });
+      return { valid, kind: frame.kind };
+    }
+
+    // The per-method payload kinds (update, snapshot, changed, ping, pong) are
+    // declared by per-stream contracts such as
+    // protocol/src/host/worktree-changed-stream.ts, not by the transport, so
+    // the transport envelope is all the proxy can hold them to - exactly what
+    // the real stream client does.
+    it.each([
+      [
+        "update with a paired binary payload",
+        { kind: "update", hasBinaryPayload: true, seq: 4 },
+      ],
+      ["snapshot", { kind: "snapshot", hasBinaryPayload: false, items: [] }],
+      ["pong", { kind: "pong", hasBinaryPayload: false }],
+    ])(
+      "accepts a host %s frame against the stream envelope",
+      (_label, payload) => {
+        expect(classifyStream(payload, "h2c").valid).toBe(true);
+        // The same frame is not an /rpc host frame, which is why leg-blind
+        // validation rejected it.
+        const rpc = classifyFrame({
+          raw: JSON.stringify(payload),
+          connId: "c1",
+          leg: "rpc",
+          direction: "h2c",
+          ts: 100,
+        });
+        expect(rpc.valid).toBe(false);
+      },
+    );
+
+    it("accepts the host openAck control frame", () => {
+      expect(
+        classifyStream(
+          {
+            kind: "openAck",
+            manifest: { "worktree.changed": { major: 1, minor: 0 } },
+          },
+          "h2c",
+        ).valid,
+      ).toBe(true);
+    });
+
+    it("accepts the host fatalError control frame", () => {
+      expect(classifyStream({ kind: "fatalError", details }, "h2c").valid).toBe(
+        true,
+      );
+    });
+
+    it.each([
+      ["open", { kind: "open", token: "t", manifest: {} }],
+      [
+        "subscribe",
+        {
+          kind: "subscribe",
+          method: "worktree.changed",
+          schemaVersion: { major: 1, minor: 0 },
+          params: {},
+        },
+      ],
+      ["credentialUpdate", { kind: "credentialUpdate", token: "t" }],
+      [
+        "hostCredentialProvision",
+        {
+          kind: "hostCredentialProvision",
+          token: "t",
+          refreshToken: "r",
+          familyId: "f",
+          provisionedAt: "2026-08-14T10:20:30.400Z",
+        },
+      ],
+      ["fatalError", { kind: "fatalError", details }],
+    ])("accepts the client %s frame", (_label, payload) => {
+      expect(classifyStream(payload, "c2h").valid).toBe(true);
+    });
+
+    // The point of leg-aware validation is a narrower net, not no net: a
+    // frame none of the stream schemas accept is still a finding.
+    it("still rejects a host frame that matches none of the stream schemas", () => {
+      // No `hasBinaryPayload`, so not an envelope; not a control kind either.
+      expect(classifyStream({ kind: "update", seq: 1 }, "h2c").valid).toBe(
+        false,
+      );
+    });
+
+    it("still rejects a client subscribe frame missing its method", () => {
+      expect(
+        classifyStream(
+          {
+            kind: "subscribe",
+            schemaVersion: { major: 1, minor: 0 },
+            params: {},
+          },
+          "c2h",
+        ).valid,
+      ).toBe(false);
+    });
+
+    it("names the schema family that rejected a stream frame", () => {
+      const c2h = classifyFrame({
+        raw: JSON.stringify({ kind: "bogus" }),
+        connId: "c1",
+        leg: "stream",
+        direction: "c2h",
+        ts: 100,
+      });
+      const h2c = classifyFrame({
+        raw: JSON.stringify({ kind: "bogus" }),
+        connId: "c1",
+        leg: "stream",
+        direction: "h2c",
+        ts: 100,
+      });
+      expect(c2h.validatedBy).toBe("clientStreamFrameSchemas");
+      expect(h2c.validatedBy).toBe("hostStreamFrameSchemas");
+    });
+
+    it("leaves the rpc leg naming its own schemas", () => {
+      expect(
+        classifyFrame({
+          raw: JSON.stringify({ kind: "bogus" }),
+          connId: "c1",
+          leg: "rpc",
+          direction: "c2h",
+          ts: 100,
+        }).validatedBy,
+      ).toBe("clientFrameSchema");
+      expect(
+        classifyFrame({
+          raw: JSON.stringify({ kind: "bogus" }),
+          connId: "c1",
+          leg: "rpc",
+          direction: "h2c",
+          ts: 100,
+        }).validatedBy,
+      ).toBe("hostFrameSchema");
+    });
+  });
+
   it("handles method field that is not a string", () => {
     const raw = JSON.stringify({
       kind: "request",

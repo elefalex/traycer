@@ -1,6 +1,6 @@
 import type { ServerWebSocket } from "bun";
 import { classifyBinaryFrame, classifyFrame } from "./frame-classifier";
-import type { Recorder } from "./recorder";
+import type { RecordedFrame, Recorder } from "./recorder";
 import { toWireFrame, type WireFrame } from "./wire-frame";
 
 /**
@@ -71,40 +71,12 @@ export async function startProxyServer(input: {
 }): Promise<ProxyServer> {
   let recordedCount = 0;
   let truncatedStreamConnections = 0;
-  const record = (
+  const appendFrame = (
+    frame: RecordedFrame,
     connId: string,
     leg: Leg,
     direction: "c2h" | "h2c",
-    wire: WireFrame,
   ): void => {
-    const ts = Date.now();
-    // A binary frame has no JSON to parse and no schema to answer to: the
-    // transport validates it by its paired text envelope, not on its own.
-    const { frame, valid } =
-      wire.type === "binary"
-        ? {
-            frame: classifyBinaryFrame({
-              byteLength: wire.bytes.byteLength,
-              connId,
-              leg,
-              direction,
-              ts,
-            }),
-            valid: true,
-          }
-        : classifyFrame({ raw: wire.text, connId, leg, direction, ts });
-    if (!valid) {
-      // The whole reason this tool exists: the open repo's schemas are the
-      // claim, the closed host's traffic is the evidence. A frame the
-      // schema rejects is a finding, so say so at capture time instead of
-      // leaving it to be noticed (or not) in the recording later. It is
-      // deliberately not recorded as a field on RecordedFrame — that shape
-      // is closed and consumers depend on it.
-      console.error(
-        `[capture-proxy] frame rejected by ${direction === "c2h" ? "clientFrameSchema" : "hostFrameSchema"} ` +
-          `connId=${connId} leg=${leg} direction=${direction} kind=${frame.kind} method=${frame.method ?? "-"}`,
-      );
-    }
     // Fire-and-forget, but never unhandled: a rejected append (disk error,
     // or a write-after-close race with recorder.close()) must drop only
     // this one frame from the recording, never crash the proxy process.
@@ -119,6 +91,57 @@ export async function startProxyServer(input: {
         );
       },
     );
+  };
+
+  const record = (
+    connId: string,
+    leg: Leg,
+    direction: "c2h" | "h2c",
+    wire: WireFrame,
+  ): void => {
+    const ts = Date.now();
+    if (wire.type === "binary") {
+      // A binary frame has no JSON to parse and no schema to answer to: the
+      // transport validates it by its paired text envelope, not on its own.
+      appendFrame(
+        classifyBinaryFrame({
+          byteLength: wire.bytes.byteLength,
+          connId,
+          leg,
+          direction,
+          ts,
+        }),
+        connId,
+        leg,
+        direction,
+      );
+      return;
+    }
+    const { frame, valid, validatedBy } = classifyFrame({
+      raw: wire.text,
+      connId,
+      leg,
+      direction,
+      ts,
+    });
+    if (!valid) {
+      // The whole reason this tool exists: the open repo's schemas are the
+      // claim, the closed host's traffic is the evidence. A frame the
+      // schema rejects is a finding, so say so at capture time instead of
+      // leaving it to be noticed (or not) in the recording later. It is
+      // deliberately not recorded as a field on RecordedFrame — that shape
+      // is closed and consumers depend on it.
+      //
+      // The schema set is named by the classifier rather than derived from
+      // the direction here, because which schemas apply depends on the leg
+      // too — naming the rpc envelope on a stream rejection would point at
+      // the wrong contract.
+      console.error(
+        `[capture-proxy] frame rejected by ${validatedBy} ` +
+          `connId=${connId} leg=${leg} direction=${direction} kind=${frame.kind} method=${frame.method ?? "-"}`,
+      );
+    }
+    appendFrame(frame, connId, leg, direction);
   };
 
   const server = Bun.serve<ConnState>({

@@ -315,6 +315,70 @@ describe("startProxyServer", () => {
     expect(joined).toMatch(/method=host\.nope/);
   });
 
+  // The counterpart of the test above, on the other leg: a real stream frame
+  // must NOT be warned about. Validating the stream leg against the /rpc
+  // envelope produced 224 of these warnings in a live capture, all on
+  // leg=stream, which buries the rejections that are actually findings.
+  it("does not warn about ordinary /stream frames", async () => {
+    upstream = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        return new Response("no");
+      },
+      websocket: {
+        message(ws) {
+          // A per-method stream frame: only the transport envelope
+          // (`kind` + `hasBinaryPayload`) is the transport's business.
+          ws.send(
+            JSON.stringify({
+              kind: "changed",
+              hasBinaryPayload: false,
+              paths: ["src/a.ts"],
+            }),
+          );
+        },
+      },
+    });
+    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/stream`;
+    const recorder = new Recorder(join(dir, "stream-valid.jsonl"));
+    proxy = await startProxyServer({
+      upstreamRpcUrl: upstreamUrl.replace("/stream", "/rpc"),
+      upstreamStreamUrl: upstreamUrl,
+      recorder,
+      port: 0,
+    });
+
+    const errors: string[] = [];
+    const spy = vi
+      .spyOn(console, "error")
+      .mockImplementation((...args: unknown[]) => {
+        errors.push(args.map((arg) => String(arg)).join(" "));
+      });
+    try {
+      const received: unknown[] = [];
+      const client = new WebSocket(`ws://127.0.0.1:${proxy.port}/stream`);
+      client.onopen = () =>
+        client.send(
+          JSON.stringify({
+            kind: "subscribe",
+            method: "worktree.changed",
+            schemaVersion: { major: 1, minor: 0 },
+            params: {},
+          }),
+        );
+      client.onmessage = (ev) => received.push(String(ev.data));
+      await waitFor(() => received.length >= 1);
+      client.close();
+    } finally {
+      spy.mockRestore();
+    }
+    await recorder.close();
+
+    expect(errors.join("\n")).not.toMatch(/rejected by/);
+  });
+
   it("returns 404 for an unknown path and does not crash the server", async () => {
     proxy = await startProxyServer({
       upstreamRpcUrl: "ws://127.0.0.1:1/rpc",
