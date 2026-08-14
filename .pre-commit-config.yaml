@@ -59,5 +59,6 @@ repos:
             eslint/.*|
             protocol/.*|
             clients/.*|
-            scripts/.*
+            scripts/.*|
+            tools/.*
           )$
