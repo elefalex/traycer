@@ -63,23 +63,32 @@ TypeScript source, so no build-step changes are needed.
 
 | Component | Purpose |
 |---|---|
-| `server/` | Localhost WebSocket listener + `host-transport` mux/chunking framing |
-| `handshake/` | Capability manifest + per-method `{major, minor}` negotiation; advertises only implemented methods |
-| `rpc/` | Dispatcher routing decoded frames to domain modules; unimplemented methods return a well-formed protocol error and log loudly (the log is the backlog) |
-| `identity/` | Local single-user identity stub — no cloud auth, no PKCE; satisfies the user/session RPCs the GUI needs to render |
-| `status/`, `config/`, `workspace/` | host-status heartbeat, on-disk config store, workspace association — the "GUI boots and renders" tier |
-| `agent/` | Agent lifecycle + one harness: **Claude Code** — spawns `claude` in a PTY, streams terminal/chat output back |
+| `server/` | Loopback listener that serves `GET /activity` (HTTP liveness), `ws://127.0.0.1:<port>/rpc` (one socket per unary request), and `.../stream` (long-lived subscriptions). Frames are **plain UTF-8 JSON text** discriminated by a `kind` field (`open`/`openAck`/`request`/`response`/`subscribe`/`fatalError`) — the binary `host-transport` mux/chunking and Noise apply only to the remote-relay path, which milestone 1 does not build |
+| `bootstrap/` | On start: bind the loopback port, then write `<host-data-dir>/pid.json` (`{pid, hostId, version, websocketUrl: "ws://127.0.0.1:<port>/rpc", startedAt, processStartIdentity}`) and unlink it on graceful shutdown. This file is the client's **only** discovery channel; the desktop rejects any URL that is not `ws(s)://127.0.0.1:<port>/rpc`. Must tolerate CLI-supplied args `--host-data-dir <dir>`, `--layer0-attempt-id`, `--layer0-status-fd` |
+| `handshake/` | On `open`, build the `openAck` manifest from `hostRpcRegistry`/`hostStreamRpcRegistry` via `buildConnectionManifest`/`splitConnectionManifest`, run `checkCompatibility(..., selfRole: "host")`. **Every one of the 113 `RELEASED_FLOOR_METHOD_NAMES` must appear in the manifest or the client hard-fatals as `INCOMPATIBLE`** — so the host serves a floor-stub layer (valid-shaped, minimal responses generated from the registry contracts) for all floor methods, with real logic swapped in per method on demand. The bearer token in the `open` frame is accepted and ignored (no cloud verification) |
+| `rpc/` | Dispatcher routing decoded frames to domain modules; a method with neither real logic nor a floor stub returns a well-formed `response.error` and logs loudly (the log is the backlog) |
+| `status/`, `config/`, `workspace/` | `host.status`, `host.getRuntimeCapabilities`, `host.identity.get`, and the `workspace.*`/`worktree.*` floor reads — the "GUI boots and renders" tier |
+| `agent/` | Agent lifecycle (`agent.create`/`agent.list`/`agent.sendMessage`/`agent.stop`) + one harness: **Claude Code** — spawns `claude` in a PTY, streams output back over `chat.subscribe` and `terminal.subscribe` |
 | `store/` | Minimal local persistence: JSON files under `~/.traycer-open/` with atomic writes (SQLite only if a later milestone forces it); capture data decides how much epic/chat schema milestone 1 actually requires |
 
 ### Client-side footprint (the entire set of fork changes to client code)
 
-- A `make dev-open` target: starts the open host, then launches the desktop
-  app in the existing dev config (localhost endpoints, empty host trust keys)
-  via the CLI's existing unsigned-host side-load path
-  (`scripts/set-deploy-target.cjs --allow-empty-pubkeys` / dogfood flow).
-- No login-screen changes if the identity stub satisfies the GUI; if the GUI
-  hard-requires a cloud auth flow to render, that becomes the one client
-  patch, kept minimal and merge-friendly.
+- A `make dev-open` target that: builds the open host, stages it as a directory
+  containing an executable named `traycer-host`, and installs it into the dev
+  slot via the surviving unsigned side-load path
+  **`traycer host install --from <dir> --allow-self-invocation`** (sha256-only,
+  no signature check; `--allow-empty-pubkeys` no longer exists), then launches
+  the desktop app in dev config. The trust root is now committed in
+  `clients/traycer-cli/src/config.ts`; the dogfood escape hatch that survives is
+  `--allow-unpinned-host`.
+- **A local-mode client auth patch is required, not optional.** The GUI cannot
+  render signed-out (`WsRpcClient` throws before dialing without a bearer;
+  `RootLandingPage` shows sign-in unless `authStatus === "signed-in"`; startup
+  hits `GET /api/v3/user`, `POST /api/v3/auth/refresh`, `GET /api/v3/hosts`).
+  Behind a `TRAYCER_LOCAL_MODE` flag the patch injects a static fake bearer
+  source and returns a synthetic signed-in user for those three calls, forcing
+  `authStatus` to `signed-in`. Kept minimal and flag-gated so upstream merges
+  stay clean; the sign-in UI is left intact, just bypassed.
 
 ### Explicitly out of scope — never built
 
@@ -91,12 +100,15 @@ usage analytics, Traycer native inference, Sentry/PostHog telemetry.
 A small WebSocket man-in-the-middle used against the author's real, working
 Traycer install:
 
-- Listens on a local port, dials the real signed host, pipes frames both ways
-  unchanged — the app keeps working while recording.
-- Decodes every frame with `@traycer/protocol` source (same mux/chunking and
-  schemas) and appends JSONL records: `{ts, direction, method, version, payload}`.
-- The client is pointed at the proxy via the same dev-config endpoint override
-  used everywhere else.
+- Listens on a loopback port, dials the real signed host's `ws://127.0.0.1/rpc`
+  and `/stream`, pipes frames both ways unchanged — the app keeps working while
+  recording.
+- Frames are already plain JSON text, so decoding is `JSON.parse` validated
+  against the protocol frame schemas (`clientFrameSchema`/`hostFrameSchema`);
+  appends JSONL records `{ts, direction, kind, method, schemaVersion, payload}`.
+- The client is pointed at the proxy by writing a `pid.json` whose
+  `websocketUrl` is the proxy's loopback URL (the only injection point; there is
+  no env-var override for the websocket URL).
 - Two scripted sessions are recorded:
   1. **Cold boot** — app start through to idle window.
   2. **Task flow** — create task → agent session starts → send message →
@@ -109,7 +121,7 @@ Traycer install:
 ## Data flow (steady state)
 
 ```
-GUI ──WS──▶ server (mux/chunk decode)
+GUI ──WS──▶ server (JSON.parse + frame-schema validate)
                 │
                 ▼
              rpc dispatcher ── unknown method ──▶ protocol error + backlog log
@@ -159,12 +171,20 @@ uniformly; domain modules emit events, the server layer owns delivery.
 
 ## Sequencing within milestone 1
 
-1. Capture proxy + record the two sessions.
-2. Server + handshake + dispatcher — GUI *connects* (window opens, even if
-   mostly empty).
-3. Status/config/workspace/identity tier — GUI *renders* fully.
-4. Agent lifecycle + Claude Code harness + terminal streams — the acceptance
-   walk passes.
+The milestone is large enough to split into three sequenced plans, each of
+which produces working, independently testable software:
+
+1. **Capture harness** — proxy + two recordings + scrubbed replay fixtures.
+   Testable on its own (record, then replay a session).
+2. **Bring-up to GUI-renders** — host scaffold, `pid.json`/`/activity`
+   bootstrap, JSON WebSocket server, handshake with the full 113-method floor
+   stubbed, the `TRAYCER_LOCAL_MODE` client auth patch, and the
+   status/config/workspace/identity tier. Deliverable: `make dev-open` opens the
+   desktop app, it connects to the open host, and the main UI renders (no agent
+   yet). Testable via replay fixtures + manual "app renders".
+3. **Live agent** — agent lifecycle + Claude Code PTY harness + `chat.subscribe`
+   / `terminal.subscribe`. Deliverable: the acceptance walk (create task →
+   Claude Code session live → message round-trip → clean shutdown).
 
 ## Later milestones (recorded here, not designed)
 
