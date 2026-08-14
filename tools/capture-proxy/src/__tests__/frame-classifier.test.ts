@@ -440,6 +440,25 @@ describe("classifyFrame", () => {
       expect(h2c.validatedBy).toBe("hostStreamFrameSchemas");
     });
 
+    /**
+     * A live capture rejected every one of these: the envelope is documented as
+     * spanning both directions, and `epic-stream-client.ts` authors exactly
+     * these frames client -> host, but only the host list carried it.
+     */
+    it.each([
+      ["applyUpdate", { kind: "applyUpdate", epicId: "e1" }],
+      ["awareness", { kind: "awareness", epicId: "e1" }],
+    ])("accepts a client-authored %s envelope frame", (_kind, body) => {
+      const result = classifyFrame({
+        raw: JSON.stringify({ ...body, hasBinaryPayload: true }),
+        connId: "c1",
+        leg: "stream",
+        direction: "c2h",
+        ts: 100,
+      });
+      expect(result.valid).toBe(true);
+    });
+
     it("leaves the rpc leg naming its own schemas", () => {
       expect(
         classifyFrame({

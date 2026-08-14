@@ -56,8 +56,19 @@ const HOST_STREAM_SCHEMAS: readonly FrameSchema[] = [
   hostStreamFatalErrorFrameSchema,
 ];
 
-/** Client -> host on the stream leg: the control frames it may emit. */
+/**
+ * Client -> host on the stream leg: the envelope plus the control frames.
+ *
+ * The envelope belongs here for the same reason it heads the host list —
+ * `streamMethodFrameEnvelopeSchema` is documented as "the text-envelope shape
+ * used for every post-`openAck` frame authored by a streaming contract (both
+ * directions)", and the client really does author them: `applyUpdate` and
+ * `awareness` from `clients/shared/host-transport/epic-stream-client.ts`, and
+ * `applyUpdate` from its notifications counterpart. Omitting it rejected every
+ * one of those in a live capture.
+ */
 const CLIENT_STREAM_SCHEMAS: readonly FrameSchema[] = [
+  streamMethodFrameEnvelopeSchema,
   clientStreamOpenFrameSchema,
   clientStreamSubscribeFrameSchema,
   clientStreamCredentialUpdateFrameSchema,
