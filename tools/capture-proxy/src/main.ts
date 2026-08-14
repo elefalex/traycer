@@ -1,7 +1,7 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { Recorder } from "./recorder";
-import { buildProxyPidMetadata, swapPidFile } from "./pid-impersonation";
+import { buildProxyPidMetadata, isValidLocalHostWebsocketUrl, swapPidFile } from "./pid-impersonation";
 import { startProxyServer, type ProxyServer } from "./proxy-server";
 import { createShutdownHandler } from "./shutdown";
 
@@ -12,7 +12,7 @@ type RealMetadata = {
   readonly streamUrl: string;
 };
 
-async function readRealMetadata(pidFile: string): Promise<RealMetadata> {
+export async function readRealMetadata(pidFile: string): Promise<RealMetadata> {
   const parsed = JSON.parse(await readFile(pidFile, "utf8")) as Record<string, unknown>;
   const websocketUrl = parsed.websocketUrl;
   const hostId = parsed.hostId;
@@ -23,6 +23,11 @@ async function readRealMetadata(pidFile: string): Promise<RealMetadata> {
     typeof version !== "string"
   ) {
     throw new Error(`Malformed pid.json at ${pidFile}`);
+  }
+  if (!isValidLocalHostWebsocketUrl(websocketUrl)) {
+    throw new Error(
+      `pid.json at ${pidFile} has an unexpected websocketUrl (expected ws(s)://127.0.0.1:<port>/rpc): ${websocketUrl}`,
+    );
   }
   return {
     hostId,
@@ -98,10 +103,14 @@ async function run(): Promise<void> {
 
   // Everything from here on acquires a resource that must be torn down if a
   // later step fails: the proxy server (once started) and pid.json (once
-  // swapped). `proxy` is tracked outside the try so the catch below can stop
-  // it even when the failure happens after it started but before the swap
-  // (or the process-level shutdown handlers) are in place.
+  // swapped). `proxy` and `restore` are tracked outside the try so the catch
+  // below can undo them even when the failure happens after they were
+  // acquired but before the process-level shutdown handlers are in place
+  // (e.g. an EPIPE on the stdout write below, from an operator piping into
+  // `| head`) — otherwise the real pid.json would be left pointing at a dead
+  // proxy with no handler installed to restore it.
   let proxy: ProxyServer | null = null;
+  let restore: (() => Promise<void>) | null = null;
   try {
     proxy = await startProxyServer({
       upstreamRpcUrl: real.rpcUrl,
@@ -115,7 +124,8 @@ async function run(): Promise<void> {
       pid: process.pid,
       nowIso: new Date().toISOString(),
     });
-    const { restore } = await swapPidFile(pidFile, meta);
+    const swapped = await swapPidFile(pidFile, meta);
+    restore = swapped.restore;
 
     process.stdout.write(
       `capture-proxy listening on ws://127.0.0.1:${proxy.port}/rpc\n` +
@@ -124,6 +134,9 @@ async function run(): Promise<void> {
 
     installShutdownHandlers({ restore, proxy, recorder });
   } catch (error) {
+    if (restore !== null) {
+      await restore();
+    }
     if (proxy !== null) {
       await proxy.stop();
     }
@@ -134,4 +147,8 @@ async function run(): Promise<void> {
   await new Promise<void>(() => {});
 }
 
-void run();
+// Guarded so importing this module (e.g. from a test, to exercise
+// `readRealMetadata`) does not also execute the CLI entrypoint.
+if (import.meta.main) {
+  void run();
+}
