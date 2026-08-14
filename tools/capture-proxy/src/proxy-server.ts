@@ -26,13 +26,25 @@ export async function startProxyServer(input: {
     direction: "c2h" | "h2c",
     raw: string,
   ): void => {
-    const { frame } = classifyFrame({
+    const { frame, valid } = classifyFrame({
       raw,
       connId,
       leg,
       direction,
       ts: Date.now(),
     });
+    if (!valid) {
+      // The whole reason this tool exists: the open repo's schemas are the
+      // claim, the closed host's traffic is the evidence. A frame the
+      // schema rejects is a finding, so say so at capture time instead of
+      // leaving it to be noticed (or not) in the recording later. It is
+      // deliberately not recorded as a field on RecordedFrame — that shape
+      // is closed and consumers depend on it.
+      console.error(
+        `[capture-proxy] frame rejected by ${direction === "c2h" ? "clientFrameSchema" : "hostFrameSchema"} ` +
+          `connId=${connId} leg=${leg} direction=${direction} kind=${frame.kind} method=${frame.method ?? "-"}`,
+      );
+    }
     // Fire-and-forget, but never unhandled: a rejected append (disk error,
     // or a write-after-close race with recorder.close()) must drop only
     // this one frame from the recording, never crash the proxy process.

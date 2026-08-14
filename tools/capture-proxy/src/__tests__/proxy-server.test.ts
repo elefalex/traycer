@@ -2,7 +2,7 @@ import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "bun";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import { Recorder } from "../recorder";
 import { startProxyServer, type ProxyServer } from "../proxy-server";
 
@@ -115,6 +115,54 @@ describe("startProxyServer", () => {
     expect(res.status).toBe(200);
     expect(res.headers.get("content-type")).toMatch(/application\/json/);
     expect(await res.json()).toEqual({ busy: true });
+  });
+
+  // A frame the open repo's schemas reject is the discovery this tool
+  // exists to make, so it must not be computed and silently discarded.
+  it("warns on stderr when a frame fails schema validation", async () => {
+    upstream = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        return new Response("no");
+      },
+      websocket: {
+        message() {
+          // Swallow: only the client->host leg is under test here.
+        },
+      },
+    });
+    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/rpc`;
+    const recorder = new Recorder(join(dir, "invalid.jsonl"));
+    proxy = await startProxyServer({
+      upstreamRpcUrl: upstreamUrl,
+      upstreamStreamUrl: upstreamUrl.replace("/rpc", "/stream"),
+      recorder,
+      port: 0,
+    });
+
+    const errors: string[] = [];
+    const spy = vi
+      .spyOn(console, "error")
+      .mockImplementation((...args: unknown[]) => {
+        errors.push(args.map((arg) => String(arg)).join(" "));
+      });
+    try {
+      const client = new WebSocket(`ws://127.0.0.1:${proxy.port}/rpc`);
+      client.onopen = () =>
+        client.send(JSON.stringify({ kind: "bogus", method: "host.nope" }));
+      await waitFor(() => errors.some((line) => line.includes("host.nope")));
+      client.close();
+    } finally {
+      spy.mockRestore();
+    }
+    await recorder.close();
+
+    const joined = errors.join("\n");
+    expect(joined).toMatch(/rejected by clientFrameSchema/);
+    expect(joined).toMatch(/kind=bogus/);
+    expect(joined).toMatch(/method=host\.nope/);
   });
 
   it("returns 404 for an unknown path and does not crash the server", async () => {
