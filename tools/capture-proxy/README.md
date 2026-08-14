@@ -62,6 +62,27 @@ double as structured non-secrets on the real wire — `token: { vars: [...] }`
 lists credential ENV VAR NAMES and `apiKey: { supported, configured, source }`
 is key state, neither of which is a credential.
 
+Three further rules are **value-based** — they apply to every string the walk
+reaches, whatever its key, because the identifying data they remove turns up in
+free text and in fields no key rule would think to name:
+
+| Rule             | Becomes                | Why it exists                                                                                                                                           |
+| ---------------- | ---------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| home directory   | `<home>`               | the operator's username is in every absolute path                                                                                                       |
+| `<home>/…` paths | `<home>/<workspace-N>` | private project names (clients, products) sit in workspace paths; the alias is stable within a recording so two frames naming one workspace still match |
+| email addresses  | `<redacted-email>`     | a live capture carried the operator's address 117 times, under `email` and `createdBy`                                                                  |
+
+Workspace numbering is per-recording — `<workspace-1>` in `boot.scrubbed.jsonl`
+and in `task-flow.scrubbed.jsonl` are unrelated. The alias keys on the whole
+matched path, so a workspace and a directory inside it get different
+placeholders; reconstructing which prefix is "the workspace root" would be
+guesswork over a tree this tool never sees, and guessing wrong republishes the
+name.
+
+The email guard reports a JSON path and withholds the value: printing the
+offending frame would write the address into a CI log, republishing the very
+thing the gate exists to withhold.
+
 **Binary frames are never scrubbed, because their content is never recorded.**
 The stream leg pairs a text envelope (`hasBinaryPayload: true`) with a binary
 frame carrying the payload. The proxy forwards those bytes byte-exact but
@@ -76,6 +97,27 @@ before a public fork.
 key or an OAuth token — under a key name no rule can recognise. It is NOT
 auto-redacted. Grep any capture that touched provider settings for
 `setEnvOverride` and redact the `value` by hand before committing.
+
+**Manual review item — directory names containing a space or a quote.** The
+workspace pattern stops at the first such character, so the tail of the path
+survives with no `<home>/` prefix left for the guard to catch. Nothing in a
+normal capture produces one, but a workspace named `~/My Projects/acme` would
+leave `Projects/acme` in the fixture.
+
+**Run the sweep yourself before committing a fixture.** The guard enforces the
+rules above; it cannot enforce the ones nobody has written yet. Both times a
+class of secret slipped through on this project, an independent grep found it
+and the green test run did not:
+
+```sh
+cd fixtures
+grep -cE '[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}' *.jsonl   # emails
+grep -c 'eyJ' *.jsonl                                                # JWT-ish
+grep -c "$(whoami)" *.jsonl                                          # username
+grep -coE '<home>/[a-zA-Z0-9._]' *.jsonl                             # unaliased paths
+```
+
+Every count must be `0`.
 
 ## Safety
 
