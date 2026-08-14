@@ -19,7 +19,8 @@
   "private": true,
   "workspaces": [
     "protocol",
-    "clients/*"
+    "clients/*",
+    "tools/*"
   ],
   "catalog": {
     "@codemirror/lang-markdown": "^6.5.2",

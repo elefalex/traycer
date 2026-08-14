@@ -1,0 +1,21 @@
+{
+  "name": "@traycer-tools/capture-proxy",
+  "license": "MIT",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "compile": "tsc --noEmit",
+    "lint": "eslint . --cache --fix --max-warnings 0",
+    "format": "bun x prettier --write .",
+    "test": "vitest run"
+  },
+  "dependencies": {
+    "@traycer/protocol": "workspace:*",
+    "zod": "catalog:"
+  },
+  "devDependencies": {
+    "@types/node": "catalog:",
+    "typescript": "catalog:",
+    "vitest": "catalog:"
+  }
+}

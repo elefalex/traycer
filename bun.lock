@@ -261,6 +261,18 @@
         "vitest": "catalog:",
       },
     },
+    "tools/capture-proxy": {
+      "name": "@traycer-tools/capture-proxy",
+      "dependencies": {
+        "@traycer/protocol": "workspace:*",
+        "zod": "catalog:",
+      },
+      "devDependencies": {
+        "@types/node": "catalog:",
+        "typescript": "catalog:",
+        "vitest": "catalog:",
+      },
+    },
   },
   "trustedDependencies": [
     "electron",
@@ -1376,6 +1388,8 @@
     "@traycer-clients/shared": ["@traycer-clients/shared@workspace:clients/shared"],
 
     "@traycer-clients/traycer-cli": ["@traycer-clients/traycer-cli@workspace:clients/traycer-cli"],
+
+    "@traycer-tools/capture-proxy": ["@traycer-tools/capture-proxy@workspace:tools/capture-proxy"],
 
     "@traycer/protocol": ["@traycer/protocol@workspace:protocol"],
 
