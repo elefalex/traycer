@@ -87,18 +87,53 @@ export async function swapPidFile(
       throw error;
     }
   }
+  const proxyBytes = JSON.stringify(next);
   const tmp = `${pidPath}.proxy-tmp`;
-  await writeFile(tmp, JSON.stringify(next), "utf8");
+  await writeFile(tmp, proxyBytes, "utf8");
   await rename(tmp, pidPath);
+  let restored = false;
   return {
     restore: async () => {
+      // Idempotent: the shutdown routine is wired to several exit paths, and
+      // a second call must not re-run the checks below (which would read the
+      // already-restored file and misreport it as a foreign rewrite).
+      if (restored) {
+        return;
+      }
+      // The dev host can restart mid-capture (crash, update, HMR) and write a
+      // fresh pid.json pointing at its new port. Blindly restoring the
+      // pre-capture bytes over that would break the operator's real install
+      // until they noticed and restarted it. Only restore when pid.json still
+      // holds exactly what this process wrote at swap time.
+      let current: string | null;
+      try {
+        current = await readFile(pidPath, "utf8");
+      } catch (error) {
+        const code = readErrorCode(error);
+        if (code === "ENOENT") {
+          current = null;
+        } else {
+          throw error;
+        }
+      }
+      if (current !== proxyBytes) {
+        console.error(
+          `[capture-proxy] pid.json at ${pidPath} was rewritten by another process ` +
+            `(the host likely restarted mid-capture) - leaving it alone rather than ` +
+            `overwriting it with stale pre-capture metadata`,
+        );
+        restored = true;
+        return;
+      }
       if (original === null) {
         await rm(pidPath, { force: true });
+        restored = true;
         return;
       }
       const restoreTmp = `${pidPath}.restore-tmp`;
       await writeFile(restoreTmp, original, "utf8");
       await rename(restoreTmp, pidPath);
+      restored = true;
     },
   };
 }

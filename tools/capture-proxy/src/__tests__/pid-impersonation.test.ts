@@ -2,7 +2,7 @@ import { existsSync } from "node:fs";
 import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 import {
   buildProxyPidMetadata,
   isValidLocalHostWebsocketUrl,
@@ -153,5 +153,63 @@ describe("swapPidFile", () => {
     await restore();
     await restore();
     expect(existsSync(pidPath)).toBe(false);
+  });
+
+  // The dev host restarting mid-capture (crash, update, HMR) rewrites
+  // pid.json with a fresh, valid port. Restoring stale pre-capture bytes
+  // over that actively breaks the operator's real install.
+  it("leaves a pid.json rewritten by another process alone instead of clobbering it", async () => {
+    const pidPath = join(dir, "pid.json");
+    await writeFile(pidPath, '{"original":true}', "utf8");
+    const next = buildProxyPidMetadata({
+      realMetadata: { hostId: "h1", version: "9.9.9" },
+      proxyPort: 51234,
+      pid: 4242,
+      nowIso: "2026-08-14T00:00:00.000Z",
+    });
+    const { restore } = await swapPidFile(pidPath, next);
+
+    // The real host respawns and publishes itself on a new port.
+    const rewritten = '{"pid":777,"websocketUrl":"ws://127.0.0.1:60000/rpc"}';
+    await writeFile(pidPath, rewritten, "utf8");
+
+    const errors: string[] = [];
+    const spy = vi
+      .spyOn(console, "error")
+      .mockImplementation((...args: unknown[]) => {
+        errors.push(args.map((arg) => String(arg)).join(" "));
+      });
+    try {
+      await restore();
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(await readFile(pidPath, "utf8")).toBe(rewritten);
+    expect(errors.join("\n")).toMatch(/rewritten by another process/);
+  });
+
+  it("does not delete a pid.json another process wrote when there was no original", async () => {
+    const pidPath = join(dir, "pid.json");
+    const next = buildProxyPidMetadata({
+      realMetadata: { hostId: "h1", version: "9.9.9" },
+      proxyPort: 51234,
+      pid: 4242,
+      nowIso: "2026-08-14T00:00:00.000Z",
+    });
+    const { restore } = await swapPidFile(pidPath, next);
+
+    const rewritten = '{"pid":777,"websocketUrl":"ws://127.0.0.1:60000/rpc"}';
+    await writeFile(pidPath, rewritten, "utf8");
+
+    const spy = vi.spyOn(console, "error").mockImplementation(() => {});
+    try {
+      await restore();
+    } finally {
+      spy.mockRestore();
+    }
+
+    expect(existsSync(pidPath)).toBe(true);
+    expect(await readFile(pidPath, "utf8")).toBe(rewritten);
   });
 });
