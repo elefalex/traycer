@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
 import { scrubFrame, scrubRecording } from "../scrub";
+import { createWorkspaceAliases } from "../secret-rule";
 import type { RecordedFrame } from "../recorder";
 import { readFile, writeFile } from "node:fs/promises";
 import { join } from "node:path";
@@ -26,18 +27,20 @@ describe("scrubFrame", () => {
         manifest: { cwd: "/Users/alex/code/app" },
       },
     };
-    const scrubbed = scrubFrame(frame, "/Users/alex");
+    const scrubbed = scrubFrame(frame, "/Users/alex", createWorkspaceAliases());
     const payload = scrubbed.payload as {
       token: string;
       manifest: { cwd: string };
     };
     expect(payload.token).toBe("<redacted-token>");
-    expect(payload.manifest.cwd).toBe("<home>/code/app");
+    // The home prefix goes first, then the workspace rule takes the segments
+    // it left behind (`code/app` names the operator's project).
+    expect(payload.manifest.cwd).toBe("<home>/<workspace-1>");
   });
 
   it("does not mutate the input frame", () => {
     const frame: RecordedFrame = { ...base, payload: { token: "x" } };
-    scrubFrame(frame, "/Users/alex");
+    scrubFrame(frame, "/Users/alex", createWorkspaceAliases());
     expect((frame.payload as { token: string }).token).toBe("x");
   });
 
@@ -55,7 +58,7 @@ describe("scrubFrame", () => {
         ],
       },
     };
-    const scrubbed = scrubFrame(frame, "/Users/alex");
+    const scrubbed = scrubFrame(frame, "/Users/alex", createWorkspaceAliases());
     const payload = scrubbed.payload as Record<string, unknown>;
     const frames = payload.frames as Array<Record<string, unknown>>;
     const firstFrame = frames[0] as Record<string, unknown>;
@@ -78,9 +81,21 @@ describe("scrubFrame", () => {
       ...base,
       payload: { token: "secret3" },
     };
-    const scrubbed1 = scrubFrame(frame1, "/Users/alex");
-    const scrubbed2 = scrubFrame(frame2, "/Users/alex");
-    const scrubbed3 = scrubFrame(frame3, "/Users/alex");
+    const scrubbed1 = scrubFrame(
+      frame1,
+      "/Users/alex",
+      createWorkspaceAliases(),
+    );
+    const scrubbed2 = scrubFrame(
+      frame2,
+      "/Users/alex",
+      createWorkspaceAliases(),
+    );
+    const scrubbed3 = scrubFrame(
+      frame3,
+      "/Users/alex",
+      createWorkspaceAliases(),
+    );
     expect((scrubbed1.payload as Record<string, unknown>).Token).toBe(
       "<redacted-token>",
     );
@@ -92,7 +107,7 @@ describe("scrubFrame", () => {
     );
   });
 
-  it("replaces home path in nested strings and array elements", () => {
+  it("replaces home path in nested strings and array elements, one placeholder per distinct path", () => {
     const frame: RecordedFrame = {
       ...base,
       payload: {
@@ -103,15 +118,17 @@ describe("scrubFrame", () => {
         },
       },
     };
-    const scrubbed = scrubFrame(frame, "/Users/alex");
+    const scrubbed = scrubFrame(frame, "/Users/alex", createWorkspaceAliases());
     const payload = scrubbed.payload as Record<string, unknown>;
     const paths = payload.paths as string[];
     const config = payload.config as Record<string, unknown>;
     const exclude = config.exclude as string[];
-    expect(paths[0]).toBe("<home>/project/src");
-    expect(paths[1]).toBe("<home>/data.json");
-    expect(config.root).toBe("<home>/project");
-    expect(exclude[0]).toBe("<home>/.cache");
+    // Traversal order is what fixes the numbering: `paths` first, then
+    // `config`. Each distinct path gets its own placeholder.
+    expect(paths[0]).toBe("<home>/<workspace-1>");
+    expect(paths[1]).toBe("<home>/<workspace-2>");
+    expect(config.root).toBe("<home>/<workspace-3>");
+    expect(exclude[0]).toBe("<home>/<workspace-4>");
   });
 
   it("leaves non-string values structurally intact", () => {
@@ -131,7 +148,7 @@ describe("scrubFrame", () => {
         },
       },
     };
-    const scrubbed = scrubFrame(frame, "/Users/alex");
+    const scrubbed = scrubFrame(frame, "/Users/alex", createWorkspaceAliases());
     const payload = scrubbed.payload as Record<string, unknown>;
     expect(payload.count).toBe(42);
     expect(payload.enabled).toBe(true);
@@ -203,13 +220,15 @@ describe("scrubFrame", () => {
 
     const payload1 = scrubbed1.payload as Record<string, unknown>;
     expect(payload1.token).toBe("<redacted-token>");
-    expect(payload1.home).toBe("<home>/project");
+    expect(payload1.home).toBe("<home>/<workspace-1>");
 
+    // Numbering continues across frames of the same recording: one table for
+    // the whole file, so frame 2's paths follow frame 1's.
     const payload2 = scrubbed2.payload as Record<string, unknown>;
-    expect(payload2.cwd).toBe("<home>/work/src");
+    expect(payload2.cwd).toBe("<home>/<workspace-2>");
     const items = payload2.items as Array<Record<string, unknown>>;
     expect(items[0].token).toBe("<redacted-token>");
-    expect(items[0].path).toBe("<home>/data");
+    expect(items[0].path).toBe("<home>/<workspace-3>");
 
     // Blanket assertion: no raw secret strings should survive
     expect(outContent).not.toContain("secret-token-123");
@@ -223,7 +242,7 @@ describe("scrubFrame", () => {
         token: ["secret-jwt-1", "secret-jwt-2"],
       },
     };
-    const scrubbed = scrubFrame(frame, "/Users/alex");
+    const scrubbed = scrubFrame(frame, "/Users/alex", createWorkspaceAliases());
     const payload = scrubbed.payload as Record<string, unknown>;
     const tokens = payload.token as string[];
     expect(tokens[0]).toBe("<redacted-token>");
@@ -243,7 +262,7 @@ describe("scrubFrame", () => {
         },
       },
     };
-    const scrubbed = scrubFrame(frame, "/Users/alex");
+    const scrubbed = scrubFrame(frame, "/Users/alex", createWorkspaceAliases());
     const payload = scrubbed.payload as Record<string, unknown>;
     const auth = payload.auth as Record<string, unknown>;
     const tokens = auth.token as Array<string | Record<string, unknown>>;
@@ -306,10 +325,8 @@ describe("scrubFrame email redaction", () => {
     payload: unknown,
     homeDir: string,
   ): Record<string, unknown> {
-    return scrubFrame({ ...base, payload }, homeDir).payload as Record<
-      string,
-      unknown
-    >;
+    return scrubFrame({ ...base, payload }, homeDir, createWorkspaceAliases())
+      .payload as Record<string, unknown>;
   }
 
   it("redacts a value under an email key", () => {
@@ -405,7 +422,7 @@ describe("scrubFrame email redaction", () => {
       { log: "/Users/alex/inbox owned by someone@example.com" },
       "/Users/alex",
     );
-    expect(scrubbed.log).toBe("<home>/inbox owned by <redacted-email>");
+    expect(scrubbed.log).toBe("<home>/<workspace-1> owned by <redacted-email>");
   });
 
   it("redacts addresses when no home dir is configured", () => {
@@ -432,5 +449,217 @@ describe("scrubFrame email redaction", () => {
     expect(outContent).not.toContain("someone@example.com");
     expect(outContent).not.toContain("a@b.io");
     expect(outContent).toContain("<redacted-email>");
+  });
+});
+
+// Workspace redaction is the third rule, and the only stateful one: the same
+// path must come out as the same placeholder everywhere in a recording, or two
+// frames that named one directory stop matching each other on replay. The
+// paths below are the shapes a live capture actually carried
+// (`<home>/Projects/personal/rental-platform`), with the private names swapped
+// for neutral stand-ins.
+describe("scrubFrame workspace path redaction", () => {
+  function payloadOf(payload: unknown): Record<string, unknown> {
+    return scrubFrame(
+      { ...base, payload },
+      "/Users/alex",
+      createWorkspaceAliases(),
+    ).payload as Record<string, unknown>;
+  }
+
+  it("replaces the segments left under <home> with a placeholder", () => {
+    const scrubbed = payloadOf({
+      workspacePath: "/Users/alex/Projects/personal/rental-platform",
+    });
+    expect(scrubbed.workspacePath).toBe("<home>/<workspace-1>");
+    expect(JSON.stringify(scrubbed)).not.toContain("rental-platform");
+  });
+
+  it("gives two different paths two different placeholders", () => {
+    const scrubbed = payloadOf({
+      a: "/Users/alex/Projects/personal/rental-platform",
+      b: "/Users/alex/Projects/skytrack/backendcarbnb",
+    });
+    expect(scrubbed.a).toBe("<home>/<workspace-1>");
+    expect(scrubbed.b).toBe("<home>/<workspace-2>");
+    const stringified = JSON.stringify(scrubbed);
+    expect(stringified).not.toContain("skytrack");
+    expect(stringified).not.toContain("carbnb");
+  });
+
+  it("gives one path the same placeholder every time it appears", () => {
+    const scrubbed = payloadOf({
+      first: "/Users/alex/Projects/skytrack/backendcarbnb",
+      other: "/Users/alex/Projects/personal/rental-platform",
+      second: "/Users/alex/Projects/skytrack/backendcarbnb",
+    });
+    expect(scrubbed.first).toBe("<home>/<workspace-1>");
+    expect(scrubbed.other).toBe("<home>/<workspace-2>");
+    expect(scrubbed.second).toBe("<home>/<workspace-1>");
+  });
+
+  it("treats a path and a deeper path under it as different paths", () => {
+    // Reconstructing which prefix is "the workspace root" would be guesswork
+    // over a tree this tool never sees, so each distinct string is its own
+    // path. Both are redacted; only the numbering differs.
+    const scrubbed = payloadOf({
+      root: "/Users/alex/Projects/personal/rental-platform",
+      file: "/Users/alex/Projects/personal/rental-platform/src/index.ts",
+    });
+    expect(scrubbed.root).toBe("<home>/<workspace-1>");
+    expect(scrubbed.file).toBe("<home>/<workspace-2>");
+  });
+
+  it("replaces only the path portion of a longer string", () => {
+    const scrubbed = payloadOf({
+      note: "opened /Users/alex/Projects/personal/rental-platform in the editor",
+    });
+    expect(scrubbed.note).toBe("opened <home>/<workspace-1> in the editor");
+  });
+
+  it("replaces every path in a string carrying more than one", () => {
+    const scrubbed = payloadOf({
+      note: "moved /Users/alex/Projects/a to /Users/alex/Projects/b",
+    });
+    expect(scrubbed.note).toBe(
+      "moved <home>/<workspace-1> to <home>/<workspace-2>",
+    );
+  });
+
+  it("leaves a bare home path with no trailing segment alone", () => {
+    const scrubbed = payloadOf({ home: "/Users/alex", cwd: "/Users/alex/" });
+    expect(scrubbed.home).toBe("<home>");
+    expect(scrubbed.cwd).toBe("<home>/");
+  });
+
+  it("leaves paths outside the home directory alone", () => {
+    // They carry no private name, and dropping them would cost the recording
+    // its replay value.
+    const payload = { bin: "/usr/local/bin/node", tmp: "/tmp/run-1/socket" };
+    expect(payloadOf(payload)).toEqual(payload);
+  });
+
+  it("emits only the token sentinel for a secret-key string containing a path", () => {
+    const scrubbed = payloadOf({
+      token: "jwt-issued-for-/Users/alex/Projects/personal/rental-platform",
+    });
+    expect(scrubbed.token).toBe("<redacted-token>");
+    expect(scrubbed.token).not.toContain("<workspace-");
+    expect(JSON.stringify(scrubbed)).not.toContain("rental-platform");
+  });
+
+  it("redacts paths inside arrays", () => {
+    const scrubbed = payloadOf({
+      workspaces: [
+        "/Users/alex/Projects/personal/rental-platform",
+        "/Users/alex/Projects/skytrack/backendcarbnb",
+        "/Users/alex/Projects/personal/rental-platform",
+        "not-a-path",
+      ],
+    });
+    expect(scrubbed.workspaces).toEqual([
+      "<home>/<workspace-1>",
+      "<home>/<workspace-2>",
+      "<home>/<workspace-1>",
+      "not-a-path",
+    ]);
+  });
+
+  it("redacts a path nested several levels under non-secret keys", () => {
+    const scrubbed = payloadOf({
+      result: {
+        tasks: [
+          {
+            meta: { workspace: { path: "/Users/alex/Projects/skytrack/api" } },
+          },
+        ],
+      },
+    });
+    const stringified = JSON.stringify(scrubbed);
+    expect(stringified).not.toContain("skytrack");
+    expect(stringified).toContain("<home>/<workspace-1>");
+  });
+
+  it("swallows an address-shaped path segment rather than half-redacting it", () => {
+    // Workspace runs before email so the path is judged as one path; the
+    // alternative leaves `<home>/Projects/` plus a surviving tail.
+    const scrubbed = payloadOf({
+      path: "/Users/alex/Projects/someone@example.com/app",
+    });
+    expect(scrubbed.path).toBe("<home>/<workspace-1>");
+    expect(JSON.stringify(scrubbed)).not.toContain("someone@example.com");
+  });
+
+  it("still redacts an address next to a path in the same string", () => {
+    const scrubbed = payloadOf({
+      note: "/Users/alex/Projects/app owned by someone@example.com",
+    });
+    expect(scrubbed.note).toBe(
+      "<home>/<workspace-1> owned by <redacted-email>",
+    );
+  });
+
+  it("keeps numbering stable across the frames of one recording", async () => {
+    const inPath = join(tmpdir(), `scrub-ws-input-${Date.now()}.jsonl`);
+    const outPath = join(tmpdir(), `scrub-ws-output-${Date.now()}.jsonl`);
+
+    const frame1: RecordedFrame = {
+      ...base,
+      payload: { cwd: "/Users/alex/Projects/skytrack/backendcarbnb" },
+    };
+    const frame2: RecordedFrame = {
+      ...base,
+      ts: 2,
+      payload: {
+        cwd: "/Users/alex/Projects/skytrack/backendcarbnb",
+        other: "/Users/alex/Projects/personal/rental-platform",
+      },
+    };
+
+    await writeFile(
+      inPath,
+      `${JSON.stringify(frame1)}\n${JSON.stringify(frame2)}\n`,
+      "utf8",
+    );
+    await scrubRecording({ inPath, outPath, homeDir: "/Users/alex" });
+
+    const outContent = await readFile(outPath, "utf8");
+    expect(outContent).not.toContain("skytrack");
+    expect(outContent).not.toContain("carbnb");
+    expect(outContent).not.toContain("rental-platform");
+
+    const outLines = outContent
+      .split("\n")
+      .filter((line) => line.trim().length > 0);
+    const payload1 = (JSON.parse(outLines[0]) as RecordedFrame)
+      .payload as Record<string, unknown>;
+    const payload2 = (JSON.parse(outLines[1]) as RecordedFrame)
+      .payload as Record<string, unknown>;
+    // Replay integrity: the two frames still name the same workspace.
+    expect(payload1.cwd).toBe("<home>/<workspace-1>");
+    expect(payload2.cwd).toBe("<home>/<workspace-1>");
+    expect(payload2.other).toBe("<home>/<workspace-2>");
+  });
+
+  it("starts numbering from 1 again for the next recording", async () => {
+    // Numbering is per-recording: a table shared between runs would make
+    // `<workspace-1>` in one file mean whatever the previous file saw first.
+    const stamp = Date.now();
+    const inPath = join(tmpdir(), `scrub-ws-a-in-${stamp}.jsonl`);
+    const outPathA = join(tmpdir(), `scrub-ws-a-out-${stamp}.jsonl`);
+    const outPathB = join(tmpdir(), `scrub-ws-b-out-${stamp}.jsonl`);
+    const frame: RecordedFrame = {
+      ...base,
+      payload: { cwd: "/Users/alex/Projects/personal/rental-platform" },
+    };
+
+    await writeFile(inPath, `${JSON.stringify(frame)}\n`, "utf8");
+    await scrubRecording({ inPath, outPath: outPathA, homeDir: "/Users/alex" });
+    await scrubRecording({ inPath, outPath: outPathB, homeDir: "/Users/alex" });
+
+    expect(await readFile(outPathA, "utf8")).toBe(
+      await readFile(outPathB, "utf8"),
+    );
+    expect(await readFile(outPathB, "utf8")).toContain("<home>/<workspace-1>");
   });
 });

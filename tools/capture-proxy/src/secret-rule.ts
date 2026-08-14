@@ -178,6 +178,163 @@ export function assertNoResidualEmails(value: unknown, path: string): void {
 }
 
 /**
+ * The third rule this module owns: the operator's WORKSPACE paths — the
+ * project directories left behind once the home directory has been swapped
+ * for `<home>`. A capture destined for a public fork still carried
+ * `<home>/Projects/personal/rental-platform` and
+ * `<home>/Projects/skytrack/backendcarbnb`: the home substitution hid who the
+ * operator is, but the segments after it name their private clients and
+ * products.
+ *
+ * Like the email rule this one is VALUE-based (a path turns up in `cwd`, in
+ * `workspacePath`, and inside free text no key list would have named) and a
+ * SUBSTRING replacement, so a path mentioned mid-sentence leaves the sentence
+ * intact.
+ *
+ * It runs strictly AFTER the home substitution — it only ever matches text
+ * that already begins `<home>/`, which is precisely the set of paths that were
+ * rooted in the operator's home directory. Paths outside home (`/usr/lib/...`,
+ * `/tmp/...`) are not workspaces and are left alone; they carry no private
+ * name and dropping them would cost the recording its replay value.
+ */
+const HOME_PLACEHOLDER = "<home>";
+
+/**
+ * Characters a path segment may contain. Deliberately permissive — anything
+ * that is not whitespace, a quote, or an angle bracket:
+ *
+ *  - whitespace and quotes end the path because a path quoted or embedded in
+ *    prose ends there far more often than a directory name contains one;
+ *  - `<` and `>` are excluded so a match can never swallow a placeholder that
+ *    an earlier rule (or an earlier run of this one) already emitted. That is
+ *    what makes the replacement idempotent: `<home>/<workspace-1>` has a `<`
+ *    immediately after the slash, so it cannot match a second time.
+ *
+ * KNOWN LIMIT: a directory name containing a space or a quote
+ * (`<home>/Projects/My Client App`) is matched only up to that character, so
+ * the tail (`Client App`) survives. The `<home>/` prefix is gone by then, so
+ * the guard below cannot see it either. That stays a manual review item before
+ * committing a fixture, alongside `providers.setEnvOverride` (see README).
+ */
+const PATH_SEGMENT_SOURCE = "[^\\s\"'`<>]+";
+
+/** `<workspace-1>`, `<workspace-2>`, … — the shape both halves agree on. */
+const WORKSPACE_PLACEHOLDER_SOURCE = "<workspace-\\d+>";
+
+/** Replacement form, global so every path in a string is rewritten. */
+const WORKSPACE_PATH_PATTERN_GLOBAL = new RegExp(
+  `${HOME_PLACEHOLDER}/${PATH_SEGMENT_SOURCE}`,
+  "g",
+);
+
+/**
+ * Guard half of the workspace rule: `<home>/` followed by anything that is not
+ * a `<workspace-N>` placeholder. Note the trailing character class is WIDER
+ * than `PATH_SEGMENT_SOURCE` (it does not exclude `<` and `>`), so the guard
+ * rejects every residual segment, including shapes the replacement above
+ * deliberately declines to touch — a fail-closed stop where a human decides,
+ * exactly like an object keyed by an email address.
+ *
+ * A bare `<home>` with no trailing path is not a workspace path and does not
+ * match; neither does a bare `<home>/`, which is what the scrubber leaves when
+ * there is no segment to redact.
+ *
+ * Kept free of the `g` flag so `.test()` is stateless.
+ */
+export const UNREDACTED_WORKSPACE_PATH_PATTERN = new RegExp(
+  `${HOME_PLACEHOLDER}/(?!${WORKSPACE_PLACEHOLDER_SOURCE})[^\\s"'\`]`,
+);
+
+/**
+ * Per-recording assignment table, mapping a matched path to the placeholder it
+ * was given. Threaded explicitly through the scrub rather than held at module
+ * scope: module-level state would leak assignments between recordings, so
+ * `<workspace-1>` in one output file would silently mean whatever the PREVIOUS
+ * file happened to see first.
+ */
+export type WorkspaceAliases = Map<string, string>;
+
+/** A fresh, empty table. One per `scrubRecording` run. */
+export function createWorkspaceAliases(): WorkspaceAliases {
+  return new Map<string, string>();
+}
+
+/**
+ * Replaces every `<home>/<rest>` in `text` with `<home>/<workspace-N>`,
+ * assigning numbers in order of first appearance and reusing `aliases` for
+ * paths already seen.
+ *
+ * Stability is the point: two frames naming the same workspace must still name
+ * the same workspace after scrubbing, or the recording stops replaying as one
+ * coherent session. Numbering is per-recording, so `<workspace-1>` in
+ * `boot.scrubbed.jsonl` and `<workspace-1>` in `task-flow.scrubbed.jsonl` are
+ * unrelated — the fixtures are replayed one file at a time, so that is fine.
+ *
+ * The key is the whole matched path, so `<home>/Projects/app` and
+ * `<home>/Projects/app/src` are two different paths and get two different
+ * placeholders. The alternative — reconstructing which prefix is "the
+ * workspace root" — would be guesswork over a directory tree this tool never
+ * sees, and guessing wrong republishes the name.
+ */
+export function redactWorkspacePaths(
+  text: string,
+  aliases: WorkspaceAliases,
+): string {
+  return text.replace(WORKSPACE_PATH_PATTERN_GLOBAL, (match) => {
+    const seen = aliases.get(match);
+    if (seen !== undefined) return seen;
+    const placeholder = `${HOME_PLACEHOLDER}/<workspace-${aliases.size + 1}>`;
+    aliases.set(match, placeholder);
+    return placeholder;
+  });
+}
+
+/**
+ * Fixture-guard half of the workspace rule: walks a parsed frame and throws on
+ * the first string — value OR key — that still carries a `<home>/…` path.
+ *
+ * Keys are checked for the same reason the email guard checks them: a map
+ * keyed by workspace path cannot be rewritten blind without risking two keys
+ * collapsing into one, so the gate stops and a human decides.
+ *
+ * The message never repeats the path it matched. Guard failures land in CI
+ * logs, and the path segment IS the private project name this gate exists to
+ * withhold — the location is enough to find it locally.
+ */
+export function assertNoResidualWorkspacePaths(
+  value: unknown,
+  path: string,
+): void {
+  if (typeof value === "string") {
+    if (UNREDACTED_WORKSPACE_PATH_PATTERN.test(value)) {
+      throw new Error(
+        `unredacted workspace path at ${path} (value withheld: the path segment is the private project name this guard exists to keep out of the repository)`,
+      );
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      assertNoResidualWorkspacePaths(item, `${path}[${index}]`),
+    );
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, child] of Object.entries(value)) {
+      if (UNREDACTED_WORKSPACE_PATH_PATTERN.test(key)) {
+        // The parent path, not `${path}.${key}` — the key IS the workspace path.
+        throw new Error(
+          `unredacted workspace path in key at ${path.length > 0 ? path : "<root>"} (value withheld: the path segment is the private project name this guard exists to keep out of the repository)`,
+        );
+      }
+      const childPath = path.length > 0 ? `${path}.${key}` : key;
+      assertNoResidualWorkspacePaths(child, childPath);
+    }
+  }
+  // null / number / boolean: cannot carry a path.
+}
+
+/**
  * Asserts a value found under a secret-named key carries no unredacted
  * credential, per the rule documented above. Throws on the first violation.
  */

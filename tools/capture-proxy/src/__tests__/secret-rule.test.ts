@@ -2,12 +2,16 @@ import { describe, expect, it } from "vitest";
 import {
   assertNoResidualEmails,
   assertNoResidualSecrets,
+  assertNoResidualWorkspacePaths,
+  createWorkspaceAliases,
   EMAIL_ADDRESS_PATTERN,
   EMAIL_REDACTION_SENTINEL,
   isSecretKey,
   redactEmailAddresses,
+  redactWorkspacePaths,
   REDACTION_SENTINEL,
   UNREDACTED_SECRET_JSON_PATTERN,
+  UNREDACTED_WORKSPACE_PATH_PATTERN,
 } from "../secret-rule";
 import { scrubFrame } from "../scrub";
 import type { RecordedFrame } from "../recorder";
@@ -32,10 +36,11 @@ function emailGuard(payload: unknown): () => void {
 }
 
 function scrubbedPayload(payload: unknown): Record<string, unknown> {
-  return scrubFrame({ ...base, payload }, "/Users/alex").payload as Record<
-    string,
-    unknown
-  >;
+  return scrubFrame(
+    { ...base, payload },
+    "/Users/alex",
+    createWorkspaceAliases(),
+  ).payload as Record<string, unknown>;
 }
 
 describe("isSecretKey", () => {
@@ -407,5 +412,223 @@ describe("assertNoResidualEmails", () => {
         nothing: null,
       }),
     ).not.toThrow();
+  });
+});
+
+// The workspace rule's two halves, asserted against each other: the pattern
+// the guard rejects with is built from the same sources the replacement uses,
+// so a fixture the scrubber cleaned is a fixture the gate accepts.
+describe("UNREDACTED_WORKSPACE_PATH_PATTERN", () => {
+  it("matches a home-rooted path that still carries a segment", () => {
+    expect("<home>/Projects/personal/rental-platform").toMatch(
+      UNREDACTED_WORKSPACE_PATH_PATTERN,
+    );
+    expect("<home>/Projects/skytrack/backendcarbnb").toMatch(
+      UNREDACTED_WORKSPACE_PATH_PATTERN,
+    );
+    expect("opened <home>/Projects/app in the editor").toMatch(
+      UNREDACTED_WORKSPACE_PATH_PATTERN,
+    );
+  });
+
+  it("does not match once the segments are a workspace placeholder", () => {
+    expect("<home>/<workspace-1>").not.toMatch(
+      UNREDACTED_WORKSPACE_PATH_PATTERN,
+    );
+    expect("<home>/<workspace-42> is the repo").not.toMatch(
+      UNREDACTED_WORKSPACE_PATH_PATTERN,
+    );
+  });
+
+  it("does not match a bare <home>, with or without a trailing slash", () => {
+    expect("<home>").not.toMatch(UNREDACTED_WORKSPACE_PATH_PATTERN);
+    expect("<home>/").not.toMatch(UNREDACTED_WORKSPACE_PATH_PATTERN);
+    expect("cwd is <home>").not.toMatch(UNREDACTED_WORKSPACE_PATH_PATTERN);
+  });
+
+  it("does not match paths outside the home directory", () => {
+    expect("/usr/local/bin/node").not.toMatch(
+      UNREDACTED_WORKSPACE_PATH_PATTERN,
+    );
+    expect("/tmp/run-1/socket").not.toMatch(UNREDACTED_WORKSPACE_PATH_PATTERN);
+  });
+
+  it("rejects a bracketed segment that is not a workspace placeholder", () => {
+    // Fail-closed: the replacement declines `<`-leading segments (it must, to
+    // stay idempotent), so the gate stops and a human decides.
+    expect("<home>/<workspace>").toMatch(UNREDACTED_WORKSPACE_PATH_PATTERN);
+    expect("<home>/<home>").toMatch(UNREDACTED_WORKSPACE_PATH_PATTERN);
+  });
+
+  it("is stateless across calls (no `g` flag lastIndex carry-over)", () => {
+    const path = "<home>/Projects/app";
+    expect(UNREDACTED_WORKSPACE_PATH_PATTERN.test(path)).toBe(true);
+    expect(UNREDACTED_WORKSPACE_PATH_PATTERN.test(path)).toBe(true);
+  });
+});
+
+describe("redactWorkspacePaths", () => {
+  it("replaces the segments and nothing else", () => {
+    expect(
+      redactWorkspacePaths(
+        "opened <home>/Projects/personal/rental-platform now",
+        createWorkspaceAliases(),
+      ),
+    ).toBe("opened <home>/<workspace-1> now");
+  });
+
+  it("numbers distinct paths in order of first appearance", () => {
+    const aliases = createWorkspaceAliases();
+    expect(redactWorkspacePaths("<home>/a", aliases)).toBe(
+      "<home>/<workspace-1>",
+    );
+    expect(redactWorkspacePaths("<home>/b", aliases)).toBe(
+      "<home>/<workspace-2>",
+    );
+  });
+
+  it("reuses the placeholder for a path it has already seen", () => {
+    const aliases = createWorkspaceAliases();
+    expect(redactWorkspacePaths("<home>/a and <home>/b", aliases)).toBe(
+      "<home>/<workspace-1> and <home>/<workspace-2>",
+    );
+    expect(redactWorkspacePaths("back to <home>/a", aliases)).toBe(
+      "back to <home>/<workspace-1>",
+    );
+  });
+
+  it("keeps separate tables separate", () => {
+    // Per-recording state: a module-level table would make `<workspace-1>` in
+    // one output mean whatever the previous run saw first.
+    expect(redactWorkspacePaths("<home>/b", createWorkspaceAliases())).toBe(
+      "<home>/<workspace-1>",
+    );
+    expect(redactWorkspacePaths("<home>/c", createWorkspaceAliases())).toBe(
+      "<home>/<workspace-1>",
+    );
+  });
+
+  it("leaves strings without a home-rooted path untouched", () => {
+    const aliases = createWorkspaceAliases();
+    expect(redactWorkspacePaths("<home>", aliases)).toBe("<home>");
+    expect(redactWorkspacePaths("/usr/lib/node", aliases)).toBe(
+      "/usr/lib/node",
+    );
+    expect(aliases.size).toBe(0);
+  });
+
+  it("is idempotent", () => {
+    const aliases = createWorkspaceAliases();
+    const once = redactWorkspacePaths("<home>/Projects/app", aliases);
+    expect(redactWorkspacePaths(once, aliases)).toBe(once);
+    expect(aliases.size).toBe(1);
+  });
+});
+
+describe("assertNoResidualWorkspacePaths", () => {
+  function workspaceGuard(payload: unknown): () => void {
+    return () => assertNoResidualWorkspacePaths(payload, "");
+  }
+
+  it("throws on a residual path under a plain key", () => {
+    expect(
+      workspaceGuard({
+        workspacePath: "<home>/Projects/personal/rental-platform",
+      }),
+    ).toThrow(/unredacted workspace path at workspacePath/);
+  });
+
+  it("never echoes the path it found", () => {
+    // The failure text lands in CI logs, and the segment IS the private
+    // project name this gate exists to withhold.
+    expect(
+      workspaceGuard({ cwd: "<home>/Projects/skytrack/backendcarbnb" }),
+    ).toThrow(/value withheld/);
+    expect(
+      workspaceGuard({ cwd: "<home>/Projects/skytrack/backendcarbnb" }),
+    ).not.toThrow(/skytrack/);
+  });
+
+  it("throws on a path embedded in a longer string", () => {
+    expect(
+      workspaceGuard({ note: "opened <home>/Projects/app in the editor" }),
+    ).toThrow(/unredacted workspace path at note/);
+  });
+
+  it("throws on a path inside an array", () => {
+    expect(
+      workspaceGuard({
+        roots: ["<home>/<workspace-1>", "<home>/Projects/app"],
+      }),
+    ).toThrow(/unredacted workspace path at roots\[1\]/);
+  });
+
+  it("throws on a path nested several levels under non-secret keys", () => {
+    expect(
+      workspaceGuard({
+        result: { tasks: [{ meta: { cwd: "<home>/Projects/app" } }] },
+      }),
+    ).toThrow(/unredacted workspace path at result\.tasks\[0\]\.meta\.cwd/);
+  });
+
+  it("throws on a path used as an object key", () => {
+    expect(
+      workspaceGuard({
+        byWorkspace: { "<home>/Projects/app": { open: true } },
+      }),
+    ).toThrow(/unredacted workspace path in key at byWorkspace/);
+  });
+
+  it("passes once the segments are the placeholder", () => {
+    expect(
+      workspaceGuard({
+        cwd: "<home>/<workspace-1>",
+        note: "opened <home>/<workspace-2>",
+        roots: ["<home>/<workspace-1>"],
+        home: "<home>",
+      }),
+    ).not.toThrow();
+  });
+
+  it("passes on paths outside the home directory and on non-strings", () => {
+    expect(
+      workspaceGuard({
+        bin: "/usr/local/bin/node",
+        count: 3,
+        ok: true,
+        nothing: null,
+      }),
+    ).not.toThrow();
+  });
+
+  // The gate's real contract, asserted in both directions on one payload:
+  // whatever the scrubber emits, the guard accepts — and the raw form it was
+  // built from, it rejects.
+  it("rejects the raw payload and accepts the scrubber's output for it", () => {
+    const payload = {
+      workspacePath: "/Users/alex/Projects/personal/rental-platform",
+      note: "built /Users/alex/Projects/skytrack/backendcarbnb for someone@example.com",
+      nested: { roots: ["/Users/alex/Projects/personal/rental-platform"] },
+      token: "jwt-for-/Users/alex/Projects/skytrack/backendcarbnb",
+      home: "/Users/alex",
+    };
+    // The half-scrubbed form — home substituted, workspace rule not run — is
+    // exactly what this rule was added to catch, and the gate rejects it.
+    expect(
+      workspaceGuard({
+        workspacePath: "<home>/Projects/personal/rental-platform",
+      }),
+    ).toThrow(/unredacted workspace path/);
+
+    const scrubbed = scrubbedPayload(payload);
+    expect(workspaceGuard(scrubbed)).not.toThrow();
+    expect(emailGuard(scrubbed)).not.toThrow();
+    expect(guard(scrubbed)).not.toThrow();
+    const stringified = JSON.stringify(scrubbed);
+    expect(stringified).not.toContain("rental-platform");
+    expect(stringified).not.toContain("skytrack");
+    expect(stringified).not.toContain("carbnb");
+    expect(scrubbed.home).toBe("<home>");
+    expect(scrubbed.token).toBe(REDACTION_SENTINEL);
   });
 });

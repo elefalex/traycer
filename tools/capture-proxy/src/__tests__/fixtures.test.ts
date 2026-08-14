@@ -6,6 +6,7 @@ import { listJsonlFilesRecursively } from "./fixture-files";
 import {
   assertNoResidualEmails,
   assertNoResidualSecrets,
+  assertNoResidualWorkspacePaths,
   UNREDACTED_SECRET_JSON_PATTERN,
 } from "../secret-rule";
 
@@ -63,6 +64,25 @@ describe("committed fixtures", () => {
         for (const line of text.trim().split("\n")) {
           const frame: unknown = JSON.parse(line);
           assertNoResidualEmails(frame, "");
+        }
+      }
+    },
+  );
+
+  // Third gate: the operator's private project names, which survive the home
+  // substitution as the segments after `<home>/`. Separate from the other two
+  // so a failure names which rule the fixture tripped, and — like the email
+  // gate and for the same reason — walker only, with no serialized-text
+  // companion check: `expect(text).not.toMatch(...)` prints the whole frame on
+  // failure, republishing into the CI log the very names this gate withholds.
+  it.skipIf(fixtureFiles.length === 0)(
+    "contains no residual workspace paths",
+    async () => {
+      for (const fixtureFile of fixtureFiles) {
+        const text = await readFile(fixtureFile, "utf8");
+        for (const line of text.trim().split("\n")) {
+          const frame: unknown = JSON.parse(line);
+          assertNoResidualWorkspacePaths(frame, "");
         }
       }
     },
