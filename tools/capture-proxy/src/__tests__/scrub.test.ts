@@ -82,13 +82,13 @@ describe("scrubFrame", () => {
     const scrubbed2 = scrubFrame(frame2, "/Users/alex");
     const scrubbed3 = scrubFrame(frame3, "/Users/alex");
     expect((scrubbed1.payload as Record<string, unknown>).Token).toBe(
-      "<redacted-token>"
+      "<redacted-token>",
     );
     expect((scrubbed2.payload as Record<string, unknown>).TOKEN).toBe(
-      "<redacted-token>"
+      "<redacted-token>",
     );
     expect((scrubbed3.payload as Record<string, unknown>).token).toBe(
-      "<redacted-token>"
+      "<redacted-token>",
     );
   });
 
@@ -174,16 +174,14 @@ describe("scrubFrame", () => {
       schemaVersion: null,
       payload: {
         cwd: "/Users/alex/work/src",
-        items: [
-          { token: "nested-secret", path: "/Users/alex/data" },
-        ],
+        items: [{ token: "nested-secret", path: "/Users/alex/data" }],
       },
     };
 
     await writeFile(
       inPath,
       `${JSON.stringify(frame1)}\n${JSON.stringify(frame2)}\n`,
-      "utf8"
+      "utf8",
     );
 
     const result = await scrubRecording({
@@ -275,11 +273,7 @@ describe("scrubFrame", () => {
       },
     };
 
-    await writeFile(
-      inPath,
-      `${JSON.stringify(frameWithTokenArray)}\n`,
-      "utf8"
-    );
+    await writeFile(inPath, `${JSON.stringify(frameWithTokenArray)}\n`, "utf8");
 
     await scrubRecording({
       inPath,

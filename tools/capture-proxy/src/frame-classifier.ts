@@ -18,7 +18,8 @@ function readSchemaVersion(
   const sv = obj.schemaVersion;
   if (sv === null || typeof sv !== "object") return null;
   const rec = sv as Record<string, unknown>;
-  if (typeof rec.major !== "number" || typeof rec.minor !== "number") return null;
+  if (typeof rec.major !== "number" || typeof rec.minor !== "number")
+    return null;
   return { major: rec.major, minor: rec.minor };
 }
 
@@ -48,7 +49,8 @@ export function classifyFrame(input: ClassifyInput): {
     parsed !== null && typeof parsed === "object"
       ? (parsed as Record<string, unknown>)
       : {};
-  const schema = input.direction === "c2h" ? clientFrameSchema : hostFrameSchema;
+  const schema =
+    input.direction === "c2h" ? clientFrameSchema : hostFrameSchema;
   const valid = schema.safeParse(parsed).success;
   return {
     valid,

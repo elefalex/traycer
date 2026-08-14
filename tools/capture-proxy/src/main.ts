@@ -1,8 +1,16 @@
 import { readFile } from "node:fs/promises";
 import { parseArgs } from "node:util";
 import { Recorder } from "./recorder";
-import { buildProxyPidMetadata, isValidLocalHostWebsocketUrl, swapPidFile } from "./pid-impersonation";
-import { startProxyServer, type ProxyServer, type ProxyStats } from "./proxy-server";
+import {
+  buildProxyPidMetadata,
+  isValidLocalHostWebsocketUrl,
+  swapPidFile,
+} from "./pid-impersonation";
+import {
+  startProxyServer,
+  type ProxyServer,
+  type ProxyStats,
+} from "./proxy-server";
 import { createShutdownHandler } from "./shutdown";
 
 type RealMetadata = {
@@ -13,7 +21,10 @@ type RealMetadata = {
 };
 
 export async function readRealMetadata(pidFile: string): Promise<RealMetadata> {
-  const parsed = JSON.parse(await readFile(pidFile, "utf8")) as Record<string, unknown>;
+  const parsed = JSON.parse(await readFile(pidFile, "utf8")) as Record<
+    string,
+    unknown
+  >;
   const websocketUrl = parsed.websocketUrl;
   const hostId = parsed.hostId;
   const version = parsed.version;
@@ -103,11 +114,17 @@ function installShutdownHandlers(deps: {
     shutdownAndExit(0);
   });
   process.on("uncaughtException", (error) => {
-    console.error("[capture-proxy] uncaught exception, restoring pid.json before exit:", error);
+    console.error(
+      "[capture-proxy] uncaught exception, restoring pid.json before exit:",
+      error,
+    );
     shutdownAndExit(1);
   });
   process.on("unhandledRejection", (reason) => {
-    console.error("[capture-proxy] unhandled rejection, restoring pid.json before exit:", reason);
+    console.error(
+      "[capture-proxy] unhandled rejection, restoring pid.json before exit:",
+      reason,
+    );
     shutdownAndExit(1);
   });
 }

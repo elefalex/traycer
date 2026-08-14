@@ -9,7 +9,10 @@ export type RecordedFrame = {
   readonly direction: "c2h" | "h2c";
   readonly kind: string;
   readonly method: string | null;
-  readonly schemaVersion: { readonly major: number; readonly minor: number } | null;
+  readonly schemaVersion: {
+    readonly major: number;
+    readonly minor: number;
+  } | null;
   readonly payload: unknown;
 };
 

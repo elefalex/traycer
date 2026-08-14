@@ -26,7 +26,10 @@ function scrubValue(value: unknown, keyName: string, homeDir: string): unknown {
   return value;
 }
 
-export function scrubFrame(frame: RecordedFrame, homeDir: string): RecordedFrame {
+export function scrubFrame(
+  frame: RecordedFrame,
+  homeDir: string,
+): RecordedFrame {
   return { ...frame, payload: scrubValue(frame.payload, "", homeDir) };
 }
 

@@ -47,12 +47,16 @@ export function isSecretKey(key: string): boolean {
 function assertSecretValueRedacted(value: unknown, path: string): void {
   if (typeof value === "string") {
     if (value !== REDACTION_SENTINEL) {
-      throw new Error(`unredacted secret string at ${path}: ${JSON.stringify(value)}`);
+      throw new Error(
+        `unredacted secret string at ${path}: ${JSON.stringify(value)}`,
+      );
     }
     return;
   }
   if (Array.isArray(value)) {
-    value.forEach((item, index) => assertSecretValueRedacted(item, `${path}[${index}]`));
+    value.forEach((item, index) =>
+      assertSecretValueRedacted(item, `${path}[${index}]`),
+    );
     return;
   }
   if (value !== null && typeof value === "object") {
@@ -71,7 +75,9 @@ function assertSecretValueRedacted(value: unknown, path: string): void {
  */
 export function assertNoResidualSecrets(value: unknown, path: string): void {
   if (Array.isArray(value)) {
-    value.forEach((item, index) => assertNoResidualSecrets(item, `${path}[${index}]`));
+    value.forEach((item, index) =>
+      assertNoResidualSecrets(item, `${path}[${index}]`),
+    );
     return;
   }
   if (value !== null && typeof value === "object") {

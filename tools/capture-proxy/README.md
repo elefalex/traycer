@@ -4,10 +4,12 @@ Records the JSON RPC/stream traffic between the Traycer desktop app and the
 real signed host, to produce replay fixtures for the open host.
 
 ## Prerequisites
+
 - A working Traycer desktop install signed in to your account.
 - This repo installed (`bun install`).
 
 ## Procedure
+
 1. Start the desktop dev host so a dev-slot `pid.json` exists:
    `make dev-desktop` (leave it running). Note the dev pid.json path printed by
    the CLI, typically `~/.traycer/host/dev/pid.json` or
@@ -39,6 +41,7 @@ real signed host, to produce replay fixtures for the open host.
 6. Scrub before committing a fixture (see Scrubbing).
 
 ## Scrubbing
+
 Run the scrub entry over each raw recording, then review the output by eye for
 any residual secrets before committing it under `fixtures/`:
 `bun run src/scrub-cli.ts --in recordings/boot.jsonl --out fixtures/boot.scrubbed.jsonl`
@@ -59,6 +62,7 @@ auto-redacted. Grep any capture that touched provider settings for
 `setEnvOverride` and redact the `value` by hand before committing.
 
 ## Safety
+
 - `recordings/` is gitignored. Never commit raw recordings.
 - The proxy restores the original pid.json on Ctrl-C; if it crashes, restart
   `make dev-desktop` to regenerate a clean pid.json.

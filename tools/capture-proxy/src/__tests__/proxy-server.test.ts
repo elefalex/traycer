@@ -44,7 +44,8 @@ describe("startProxyServer", () => {
       websocket: {
         message(ws, msg) {
           const frame = JSON.parse(String(msg));
-          if (frame.kind === "open") ws.send(JSON.stringify({ kind: "openAck", manifest: {} }));
+          if (frame.kind === "open")
+            ws.send(JSON.stringify({ kind: "openAck", manifest: {} }));
           if (frame.kind === "request")
             ws.send(
               JSON.stringify({
@@ -85,7 +86,9 @@ describe("startProxyServer", () => {
     };
     client.onmessage = (ev) => received.push(JSON.parse(String(ev.data)));
 
-    await waitFor(() => received.some((f) => (f as { kind: string }).kind === "response"));
+    await waitFor(() =>
+      received.some((f) => (f as { kind: string }).kind === "response"),
+    );
     client.close();
     await recorder.close();
 

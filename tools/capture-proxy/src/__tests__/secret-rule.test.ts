@@ -1,5 +1,9 @@
 import { describe, expect, it } from "vitest";
-import { assertNoResidualSecrets, isSecretKey, REDACTION_SENTINEL } from "../secret-rule";
+import {
+  assertNoResidualSecrets,
+  isSecretKey,
+  REDACTION_SENTINEL,
+} from "../secret-rule";
 import { scrubFrame } from "../scrub";
 import type { RecordedFrame } from "../recorder";
 
@@ -19,7 +23,10 @@ function guard(payload: unknown): () => void {
 }
 
 function scrubbedPayload(payload: unknown): Record<string, unknown> {
-  return scrubFrame({ ...base, payload }, "/Users/alex").payload as Record<string, unknown>;
+  return scrubFrame({ ...base, payload }, "/Users/alex").payload as Record<
+    string,
+    unknown
+  >;
 }
 
 describe("isSecretKey", () => {
@@ -50,13 +57,17 @@ describe("structured non-secrets under a secret-named key", () => {
   });
 
   it("accepts token: { vars: [...] } and leaves the env-var names intact", () => {
-    const payload = { token: { vars: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] } };
+    const payload = {
+      token: { vars: ["ANTHROPIC_API_KEY", "CLAUDE_CODE_OAUTH_TOKEN"] },
+    };
     expect(guard(payload)).not.toThrow();
     expect(scrubbedPayload(payload)).toEqual(payload);
   });
 
   it("accepts apiKey: { supported, configured, source } unchanged", () => {
-    const payload = { apiKey: { supported: true, configured: false, source: "env" } };
+    const payload = {
+      apiKey: { supported: true, configured: false, source: "env" },
+    };
     expect(guard(payload)).not.toThrow();
     expect(scrubbedPayload(payload)).toEqual(payload);
   });
@@ -96,14 +107,19 @@ describe("structured non-secrets under a secret-named key", () => {
 
 describe("raw credentials under a secret-named key", () => {
   it("redacts a string apiKey (providers.setApiKey carries the pasted key verbatim)", () => {
-    const scrubbed = scrubbedPayload({ providerId: "cursor", apiKey: "sk-ant-xxx" });
+    const scrubbed = scrubbedPayload({
+      providerId: "cursor",
+      apiKey: "sk-ant-xxx",
+    });
     expect(scrubbed.apiKey).toBe(REDACTION_SENTINEL);
     expect(JSON.stringify(scrubbed)).not.toContain("sk-ant-xxx");
     expect(guard(scrubbed)).not.toThrow();
   });
 
   it("fails the guard on an unredacted string apiKey", () => {
-    expect(guard({ apiKey: "sk-ant-xxx" })).toThrow(/unredacted secret string at apiKey/);
+    expect(guard({ apiKey: "sk-ant-xxx" })).toThrow(
+      /unredacted secret string at apiKey/,
+    );
   });
 
   it("redacts every element of an array apiKey", () => {
@@ -128,7 +144,11 @@ describe("raw credentials under a secret-named key", () => {
   });
 
   it("keeps redacting string tokens", () => {
-    expect(scrubbedPayload({ token: "bearer-jwt" }).token).toBe(REDACTION_SENTINEL);
-    expect(guard({ token: "bearer-jwt" })).toThrow(/unredacted secret string at token/);
+    expect(scrubbedPayload({ token: "bearer-jwt" }).token).toBe(
+      REDACTION_SENTINEL,
+    );
+    expect(guard({ token: "bearer-jwt" })).toThrow(
+      /unredacted secret string at token/,
+    );
   });
 });

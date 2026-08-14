@@ -96,7 +96,8 @@ export async function startProxyServer(input: {
       }
       const leg: Leg = url.pathname === "/rpc" ? "rpc" : "stream";
       const connId = `conn-${(connCounter += 1)}`;
-      const upstreamUrl = leg === "rpc" ? input.upstreamRpcUrl : input.upstreamStreamUrl;
+      const upstreamUrl =
+        leg === "rpc" ? input.upstreamRpcUrl : input.upstreamStreamUrl;
       const upstream = new WebSocket(upstreamUrl);
       const state: ConnState = { connId, leg, upstream, outbox: [] };
       if (srv.upgrade(req, { data: state })) return undefined;
@@ -131,7 +132,10 @@ export async function startProxyServer(input: {
         // readyState is authoritative at the instant we check it, so it
         // cannot go stale the way a cached flag can.
         const readyState = state.upstream.readyState;
-        if (readyState === WebSocket.CLOSING || readyState === WebSocket.CLOSED) {
+        if (
+          readyState === WebSocket.CLOSING ||
+          readyState === WebSocket.CLOSED
+        ) {
           // Upstream is gone or going away: sending would silently drop
           // the frame. Recording it as forwarded here would misrepresent
           // a dropped frame as delivered, so it is neither recorded nor
