@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Server } from "bun";
@@ -249,5 +249,160 @@ describe("startProxyServer", () => {
     expect(c2h).toBeDefined();
     expect(h2c).toBeDefined();
     expect(c2h.connId).toBe(h2c.connId);
+  });
+
+  it("keeps forwarding when recorder.append() rejects, instead of crashing the process", async () => {
+    // A parent path component that is a plain FILE (not a directory) makes
+    // Recorder's mkdir(dirname(...), { recursive: true }) reject on every
+    // append. This must degrade to "frame missing from the recording",
+    // never "proxy process dies" (an unhandled rejection kills a Bun
+    // process outright, dropping every active connection).
+    const blockerFile = join(dir, "blocker");
+    await writeFile(blockerFile, "not a directory");
+    const recorder = new Recorder(join(blockerFile, "unwritable", "rec.jsonl"));
+
+    upstream = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        return new Response("no");
+      },
+      websocket: {
+        message(ws, msg) {
+          if (String(msg) === "ping") ws.send("pong");
+        },
+      },
+    });
+    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/rpc`;
+    proxy = await startProxyServer({
+      upstreamRpcUrl: upstreamUrl,
+      upstreamStreamUrl: upstreamUrl.replace("/rpc", "/stream"),
+      recorder,
+      port: 0,
+    });
+
+    const received: string[] = [];
+    const client = new WebSocket(`ws://127.0.0.1:${proxy.port}/rpc`);
+    client.onopen = () => client.send("ping");
+    client.onmessage = (ev) => received.push(String(ev.data));
+
+    // Both directions must still be forwarded despite every append() call
+    // rejecting behind the scenes.
+    await waitFor(() => received.includes("pong"));
+    client.close();
+
+    // The process is still alive and serving new connections — proof that
+    // no unhandled rejection took the proxy down.
+    const activity = await fetch(`http://127.0.0.1:${proxy.port}/activity`);
+    expect(activity.status).toBe(200);
+  });
+
+  it("never records a client frame as forwarded once upstream is gone, and survives losing it mid-connection", async () => {
+    const upstreamReceived: string[] = [];
+    upstream = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        return new Response("no");
+      },
+      websocket: {
+        message(_ws, msg) {
+          upstreamReceived.push(String(msg));
+        },
+      },
+    });
+    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/rpc`;
+    const recFile = join(dir, "stale.jsonl");
+    const recorder = new Recorder(recFile);
+    proxy = await startProxyServer({
+      upstreamRpcUrl: upstreamUrl,
+      upstreamStreamUrl: upstreamUrl.replace("/rpc", "/stream"),
+      recorder,
+      port: 0,
+    });
+
+    const client = new WebSocket(`ws://127.0.0.1:${proxy.port}/rpc`);
+    client.onopen = () => client.send("first");
+
+    await waitFor(() => upstreamReceived.includes("first"));
+
+    // Kill the whole upstream server (not a per-connection close triggered
+    // by a client message) and, in the same synchronous burst — no await
+    // in between — try to push one more frame through the very connection
+    // whose upstream just vanished. This deterministically reproduces the
+    // regression: before the fix, `state.upstreamOpen` was only flipped to
+    // false from the *callback* that `state.upstream`'s close/error event
+    // invokes, so it could still read `true` for a message processed in
+    // the same tick as the underlying socket going away. The fix reads
+    // `state.upstream.readyState` live at message time instead of a cached
+    // flag, so it cannot be stale by even one event-loop turn.
+    upstream.stop(true);
+    client.send("second");
+
+    // Let everything settle: the close propagating to the client, and any
+    // recorder append for "second" that may or may not have happened.
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    await recorder.close();
+
+    // Process survived losing its upstream mid-connection.
+    const activity = await fetch(`http://127.0.0.1:${proxy.port}/activity`);
+    expect(activity.status).toBe(200);
+
+    const frames = (await readFile(recFile, "utf8"))
+      .trim()
+      .split("\n")
+      .map((l) => JSON.parse(l));
+    const c2hFrames = frames.filter((f) => f.direction === "c2h");
+
+    // The fidelity property under test: the recording must never claim
+    // more frames were forwarded to upstream than upstream actually
+    // received. "first" is the only frame that upstream legitimately saw;
+    // "second" — sent into a socket the proxy already knows is gone — must
+    // not be recorded as if it were successfully forwarded.
+    expect(c2hFrames.map((f) => f.payload)).toEqual(["first"]);
+    expect(upstreamReceived).toEqual(["first"]);
+  });
+
+  it("closes the dialed upstream socket and stays healthy after a failed /rpc upgrade", async () => {
+    upstream = Bun.serve({
+      port: 0,
+      hostname: "127.0.0.1",
+      fetch(req, server) {
+        if (server.upgrade(req)) return undefined;
+        return new Response("no");
+      },
+      websocket: {
+        message(ws, msg) {
+          if (String(msg) === "ping") ws.send("pong");
+        },
+      },
+    });
+    const upstreamUrl = `ws://127.0.0.1:${upstream.port}/rpc`;
+    const recorder = new Recorder(join(dir, "failed-upgrade.jsonl"));
+    proxy = await startProxyServer({
+      upstreamRpcUrl: upstreamUrl,
+      upstreamStreamUrl: upstreamUrl.replace("/rpc", "/stream"),
+      recorder,
+      port: 0,
+    });
+
+    // A plain GET with no Upgrade header cannot be upgraded — this used to
+    // leak the outbound dial to the real host daemon that was already
+    // opened before the upgrade attempt.
+    const res = await fetch(`http://127.0.0.1:${proxy.port}/rpc`);
+    expect(res.status).toBe(500);
+
+    // The server must still work afterward: a real websocket connection
+    // still forwards successfully.
+    const received: string[] = [];
+    const client = new WebSocket(`ws://127.0.0.1:${proxy.port}/rpc`);
+    client.onopen = () => client.send("ping");
+    client.onmessage = (ev) => received.push(String(ev.data));
+
+    await waitFor(() => received.includes("pong"));
+    client.close();
+    await recorder.close();
   });
 });
