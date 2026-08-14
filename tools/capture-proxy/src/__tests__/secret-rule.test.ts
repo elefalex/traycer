@@ -3,6 +3,7 @@ import {
   assertNoResidualSecrets,
   isSecretKey,
   REDACTION_SENTINEL,
+  UNREDACTED_SECRET_JSON_PATTERN,
 } from "../secret-rule";
 import { scrubFrame } from "../scrub";
 import type { RecordedFrame } from "../recorder";
@@ -39,10 +40,52 @@ describe("isSecretKey", () => {
     expect(isSecretKey("APIKEY")).toBe(true);
   });
 
+  it("matches refreshToken case-insensitively", () => {
+    expect(isSecretKey("refreshToken")).toBe(true);
+    expect(isSecretKey("refreshtoken")).toBe(true);
+    expect(isSecretKey("REFRESHTOKEN")).toBe(true);
+  });
+
   it("does not match unrelated keys", () => {
     expect(isSecretKey("tokens")).toBe(false);
     expect(isSecretKey("apiKeyState")).toBe(false);
+    expect(isSecretKey("refreshTokenState")).toBe(false);
     expect(isSecretKey("method")).toBe(false);
+  });
+});
+
+// The serialized-form pattern is the belt to the walker's braces in the
+// committed-fixture guard. It lives beside the key set so the two cannot
+// drift, and it is asserted here because the guard that consumes it
+// self-skips whenever `fixtures/` is empty.
+describe("UNREDACTED_SECRET_JSON_PATTERN", () => {
+  it("matches every secret key name carrying a raw string value", () => {
+    expect('{"token":"bearer-jwt"}').toMatch(UNREDACTED_SECRET_JSON_PATTERN);
+    expect('{"apiKey":"sk-ant-xxx"}').toMatch(UNREDACTED_SECRET_JSON_PATTERN);
+    expect('{"refreshToken":"eyJhbGciOiJkaXIifQ..iv.ct.tag"}').toMatch(
+      UNREDACTED_SECRET_JSON_PATTERN,
+    );
+  });
+
+  it("does not match once the value is the redaction sentinel", () => {
+    expect(`{"token":"${REDACTION_SENTINEL}"}`).not.toMatch(
+      UNREDACTED_SECRET_JSON_PATTERN,
+    );
+    expect(`{"refreshToken":"${REDACTION_SENTINEL}"}`).not.toMatch(
+      UNREDACTED_SECRET_JSON_PATTERN,
+    );
+  });
+
+  it("does not match a key that merely contains a secret key name", () => {
+    // Both ends of the key are anchored (`"<name>":"`), so `refreshToken`
+    // containing `token` cannot be matched by the `token` alternative, and a
+    // longer key such as `tokenHint` is not a secret key at all.
+    expect('{"tokenHint":"not-a-credential"}').not.toMatch(
+      UNREDACTED_SECRET_JSON_PATTERN,
+    );
+    expect('{"refreshTokenState":"issued"}').not.toMatch(
+      UNREDACTED_SECRET_JSON_PATTERN,
+    );
   });
 });
 
@@ -150,5 +193,55 @@ describe("raw credentials under a secret-named key", () => {
     expect(guard({ token: "bearer-jwt" })).toThrow(
       /unredacted secret string at token/,
     );
+  });
+
+  // hostCredentialProvision (protocol
+  // src/framework/stream-ws-protocol.ts:210-218) puts a refresh credential on
+  // the stream leg, which this proxy records. It is the highest-value secret
+  // on the wire: a refresh token mints new access tokens.
+  it("redacts a string refreshToken", () => {
+    const jwe =
+      "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..aXYxMjM.Y2lwaGVy.dGFn";
+    const scrubbed = scrubbedPayload({ refreshToken: jwe });
+    expect(scrubbed.refreshToken).toBe(REDACTION_SENTINEL);
+    expect(JSON.stringify(scrubbed)).not.toContain(jwe);
+    expect(guard(scrubbed)).not.toThrow();
+  });
+
+  it("fails the guard on an unredacted string refreshToken", () => {
+    expect(
+      guard({
+        refreshToken:
+          "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..aXYxMjM.Y2lwaGVy.dGFn",
+      }),
+    ).toThrow(/unredacted secret string at refreshToken/);
+  });
+
+  it("redacts both credentials of a hostCredentialProvision frame and keeps familyId", () => {
+    const payload = {
+      kind: "hostCredentialProvision",
+      token: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJ1c2VyIn0.c2ln",
+      refreshToken:
+        "eyJhbGciOiJkaXIiLCJlbmMiOiJBMjU2R0NNIn0..aXYxMjM.Y2lwaGVy.dGFn",
+      familyId: "fam_01HZY8Q3K7",
+      provisionedAt: "2026-08-14T09:30:00.000Z",
+    };
+    const scrubbed = scrubbedPayload(payload);
+
+    expect(scrubbed.token).toBe(REDACTION_SENTINEL);
+    expect(scrubbed.refreshToken).toBe(REDACTION_SENTINEL);
+    // familyId identifies a credential family, not a credential: it must
+    // survive so the recording still shows how provisioning is sequenced.
+    expect(scrubbed.familyId).toBe("fam_01HZY8Q3K7");
+    expect(scrubbed.provisionedAt).toBe("2026-08-14T09:30:00.000Z");
+    expect(JSON.stringify(scrubbed)).not.toContain("Y2lwaGVy");
+    expect(JSON.stringify(scrubbed)).not.toContain("c2ln");
+    expect(guard(scrubbed)).not.toThrow();
+    expect(JSON.stringify(scrubbed)).not.toMatch(
+      UNREDACTED_SECRET_JSON_PATTERN,
+    );
+
+    expect(guard(payload)).toThrow(/unredacted secret string at token/);
+    expect(JSON.stringify(payload)).toMatch(UNREDACTED_SECRET_JSON_PATTERN);
   });
 });

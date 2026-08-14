@@ -26,6 +26,14 @@
  * verbatim client->host (`providersSetApiKeyRequestSchema`: `apiKey:
  * z.string().min(1)`).
  *
+ * `refreshToken` is in the set because the `hostCredentialProvision` frame
+ * carries one verbatim client->host on the STREAM leg — one of the two legs
+ * this proxy records (protocol `src/framework/stream-ws-protocol.ts:210-218`:
+ * `refreshToken: z.string().min(1)`, sent by
+ * `clients/shared/host-transport/ws-stream-client.ts`). It is the
+ * highest-value secret on the wire: a refresh credential mints new access
+ * tokens, so a leaked one outlives the access token beside it.
+ *
  * NOT covered, by design: `providers.setEnvOverride` sends `{ providerId,
  * key, value }` where `key` NAMES the env var and `value` carries the raw
  * credential under a generic key name no rule can recognise. That stays a
@@ -33,12 +41,37 @@
  */
 export const REDACTION_SENTINEL = "<redacted-token>";
 
-const SECRET_KEYS: ReadonlySet<string> = new Set(["token", "apikey"]);
+const SECRET_KEYS: ReadonlySet<string> = new Set([
+  "token",
+  "apikey",
+  "refreshtoken",
+]);
 
 /** True when a value directly under this key name may be a raw credential. Compared case-insensitively. */
 export function isSecretKey(key: string): boolean {
   return SECRET_KEYS.has(key.toLowerCase());
 }
+
+/**
+ * Belt-and-braces companion to the walk below, matching the plain
+ * `"token":"..."` form on a frame's SERIALIZED text. Built from the same key
+ * set so it cannot drift out of step with `isSecretKey` — a hand-maintained
+ * copy of these names in the fixture guard is exactly the drift this module
+ * exists to prevent.
+ *
+ * Both ends of the key are anchored (`"<name>":"`), so alternation order is
+ * irrelevant and a key that merely CONTAINS a secret name is not matched:
+ * `"refreshToken":"` is matched by the `refreshtoken` alternative, never by
+ * `token` (there is no quote before `token` there), and `"tokenHint":"` is
+ * matched by neither.
+ *
+ * It cannot see credentials inside arrays (those serialize with a `[`) — the
+ * walk is the thorough check; this is the cheap independent one.
+ */
+export const UNREDACTED_SECRET_JSON_PATTERN = new RegExp(
+  `"(?:${[...SECRET_KEYS].join("|")})":"(?!${REDACTION_SENTINEL})`,
+  "i",
+);
 
 /**
  * Asserts a value found under a secret-named key carries no unredacted

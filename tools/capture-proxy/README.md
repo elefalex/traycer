@@ -48,9 +48,11 @@ any residual secrets before committing it under `fixtures/`:
 
 What the scrubber redacts is defined once in `src/secret-rule.ts` and enforced
 by the committed-fixture guard (`src/__tests__/fixtures.test.ts`): string
-values under a `token` or `apiKey` key (case-insensitive), including inside
-arrays. Objects under those keys are descended into instead, because both
-names double as structured non-secrets on the real wire — `token: { vars: [...] }`
+values under a `token`, `apiKey` or `refreshToken` key (case-insensitive),
+including inside arrays. `refreshToken` is there because the stream leg's
+`hostCredentialProvision` frame carries a raw refresh credential. Objects
+under those keys are descended into instead, because `token` and `apiKey`
+double as structured non-secrets on the real wire — `token: { vars: [...] }`
 lists credential ENV VAR NAMES and `apiKey: { supported, configured, source }`
 is key state, neither of which is a credential.
 
