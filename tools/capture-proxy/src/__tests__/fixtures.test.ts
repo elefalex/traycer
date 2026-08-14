@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { listJsonlFilesRecursively } from "./fixture-files";
 import {
+  assertNoResidualEmails,
   assertNoResidualSecrets,
   UNREDACTED_SECRET_JSON_PATTERN,
 } from "../secret-rule";
@@ -38,6 +39,30 @@ describe("committed fixtures", () => {
             UNREDACTED_SECRET_JSON_PATTERN,
           );
           assertNoResidualSecrets(frame, "");
+        }
+      }
+    },
+  );
+
+  // PII gate, separate from the credential gate so a failure says which of
+  // the two rules a fixture tripped. Same import discipline: the walk comes
+  // from ../secret-rule, built on the exact pattern the scrubber redacts
+  // with, so the gate cannot pass something the scrubber missed.
+  //
+  // There is no serialized-text companion check here, unlike the credential
+  // gate above. `expect(text).not.toMatch(EMAIL_ADDRESS_PATTERN)` prints the
+  // whole non-matching frame on failure — it would dump the operator's
+  // address into the CI log, republishing the PII the gate is meant to
+  // withhold. The walk is complete for a value-based rule anyway (it visits
+  // every string in the frame, keys included) and reports a path only.
+  it.skipIf(fixtureFiles.length === 0)(
+    "contains no residual email addresses",
+    async () => {
+      for (const fixtureFile of fixtureFiles) {
+        const text = await readFile(fixtureFile, "utf8");
+        for (const line of text.trim().split("\n")) {
+          const frame: unknown = JSON.parse(line);
+          assertNoResidualEmails(frame, "");
         }
       }
     },

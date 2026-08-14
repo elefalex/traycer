@@ -74,6 +74,110 @@ export const UNREDACTED_SECRET_JSON_PATTERN = new RegExp(
 );
 
 /**
+ * The second rule this module owns: personal email addresses. Same
+ * anti-drift discipline as the credential rule — the scrubber rewrites with
+ * `redactEmailAddresses` and the fixture guard asserts with
+ * `assertNoResidualEmails`, both built from the single pattern below.
+ *
+ * Unlike the credential rule, this one is VALUE-based, not key-based. A live
+ * capture put the operator's address under `email` and `createdBy`, and also
+ * deeper inside free-text fields; any list of key names is a list of the
+ * places we happened to look. The shape of the value is the reliable signal,
+ * so every string the walk reaches is judged, whatever key it sits under.
+ *
+ * Redaction is a substring replacement, not a whole-value one: only the
+ * address is swapped for the sentinel, leaving the surrounding sentence
+ * intact so the recording still reads as a recording.
+ */
+export const EMAIL_REDACTION_SENTINEL = "<redacted-email>";
+
+/**
+ * A deliberately practical `local@domain.tld` matcher — NOT RFC 5322, which
+ * permits quoted local parts, comments, and bracketed IP-literal domains that
+ * no capture of ours has ever carried and whose grammar cannot be expressed
+ * as one readable regex. It covers what real addresses look like:
+ *
+ *  - local part: letters, digits, and the usual `. _ % + -` (so
+ *    `first.last+tag` is matched),
+ *  - domain: one or more dot-separated labels,
+ *  - a final TLD of two or more LETTERS, which is what keeps this from
+ *    firing on every `@` in the capture.
+ *
+ * That last requirement is the whole false-positive defence: `user@host`
+ * (no dot), `@scope/pkg`, `@traycer/protocol` and `.../node_modules/@babel/core`
+ * (nothing address-shaped before the `@`) are all left alone.
+ *
+ * The trade is set intentionally towards over-matching: a false positive
+ * costs one redacted string in a test fixture, a false negative publishes
+ * someone's address to a public repository.
+ */
+const EMAIL_ADDRESS_SOURCE =
+  "[A-Za-z0-9._%+-]+@[A-Za-z0-9-]+(?:\\.[A-Za-z0-9-]+)*\\.[A-Za-z]{2,}";
+
+/**
+ * Detection form, kept free of the `g` flag so `.test()` is stateless —
+ * a shared global regex would carry `lastIndex` between calls and start
+ * answering `false` for addresses it had already seen.
+ */
+export const EMAIL_ADDRESS_PATTERN = new RegExp(EMAIL_ADDRESS_SOURCE);
+
+/** Replacement form. Same source, so it can never diverge from the detector. */
+const EMAIL_ADDRESS_PATTERN_GLOBAL = new RegExp(EMAIL_ADDRESS_SOURCE, "g");
+
+/**
+ * Replaces every address in `text` with the sentinel, leaving the rest of the
+ * string untouched. Idempotent: the sentinel contains no `@`, so re-running
+ * the scrubber over its own output is a no-op.
+ */
+export function redactEmailAddresses(text: string): string {
+  return text.replace(EMAIL_ADDRESS_PATTERN_GLOBAL, EMAIL_REDACTION_SENTINEL);
+}
+
+/**
+ * Fixture-guard half of the email rule: walks a parsed frame and throws on
+ * the first string — value OR key — that still carries an address.
+ *
+ * Object KEYS are checked even though `scrubValue` only rewrites values. A
+ * capture keyed by address (`{ seats: { "a@b.com": ... } }`) cannot be fixed
+ * by a blind rewrite without silently collapsing two keys into one, so the
+ * gate fails closed and a human decides what to do. That has not happened
+ * yet; if it ever does, the failure names the parent path.
+ *
+ * The message never repeats the address it matched. Guard failures land in CI
+ * logs, and reprinting the PII there would republish exactly what this gate
+ * exists to withhold — the path is enough to find it locally.
+ */
+export function assertNoResidualEmails(value: unknown, path: string): void {
+  if (typeof value === "string") {
+    if (EMAIL_ADDRESS_PATTERN.test(value)) {
+      throw new Error(
+        `unredacted email address at ${path} (value withheld: it is the PII this guard exists to keep out of the repository)`,
+      );
+    }
+    return;
+  }
+  if (Array.isArray(value)) {
+    value.forEach((item, index) =>
+      assertNoResidualEmails(item, `${path}[${index}]`),
+    );
+    return;
+  }
+  if (value !== null && typeof value === "object") {
+    for (const [key, child] of Object.entries(value)) {
+      if (EMAIL_ADDRESS_PATTERN.test(key)) {
+        // The parent path, not `${path}.${key}` — the key IS the address.
+        throw new Error(
+          `unredacted email address in key at ${path.length > 0 ? path : "<root>"} (value withheld: it is the PII this guard exists to keep out of the repository)`,
+        );
+      }
+      const childPath = path.length > 0 ? `${path}.${key}` : key;
+      assertNoResidualEmails(child, childPath);
+    }
+  }
+  // null / number / boolean: cannot carry an address.
+}
+
+/**
  * Asserts a value found under a secret-named key carries no unredacted
  * credential, per the rule documented above. Throws on the first violation.
  */

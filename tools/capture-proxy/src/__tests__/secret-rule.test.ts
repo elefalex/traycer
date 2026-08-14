@@ -1,7 +1,11 @@
 import { describe, expect, it } from "vitest";
 import {
+  assertNoResidualEmails,
   assertNoResidualSecrets,
+  EMAIL_ADDRESS_PATTERN,
+  EMAIL_REDACTION_SENTINEL,
   isSecretKey,
+  redactEmailAddresses,
   REDACTION_SENTINEL,
   UNREDACTED_SECRET_JSON_PATTERN,
 } from "../secret-rule";
@@ -21,6 +25,10 @@ const base: RecordedFrame = {
 
 function guard(payload: unknown): () => void {
   return () => assertNoResidualSecrets(payload, "");
+}
+
+function emailGuard(payload: unknown): () => void {
+  return () => assertNoResidualEmails(payload, "");
 }
 
 function scrubbedPayload(payload: unknown): Record<string, unknown> {
@@ -243,5 +251,161 @@ describe("raw credentials under a secret-named key", () => {
 
     expect(guard(payload)).toThrow(/unredacted secret string at token/);
     expect(JSON.stringify(payload)).toMatch(UNREDACTED_SECRET_JSON_PATTERN);
+  });
+});
+
+describe("EMAIL_ADDRESS_PATTERN", () => {
+  it("matches the common local@domain.tld shapes a capture carries", () => {
+    expect("someone@example.com").toMatch(EMAIL_ADDRESS_PATTERN);
+    expect("first.last+tag@sub.example.co.uk").toMatch(EMAIL_ADDRESS_PATTERN);
+    expect("UPPER.CASE@Example.COM").toMatch(EMAIL_ADDRESS_PATTERN);
+    expect("a_b%c-d@my-host.io").toMatch(EMAIL_ADDRESS_PATTERN);
+  });
+
+  it("matches an address embedded in surrounding text", () => {
+    expect("owner is someone@example.com, ping them").toMatch(
+      EMAIL_ADDRESS_PATTERN,
+    );
+    expect("<mailto:someone@example.com>").toMatch(EMAIL_ADDRESS_PATTERN);
+  });
+
+  it("does not match `@` strings that are not addresses", () => {
+    // A scoped npm package, a bare host with no TLD, a decorator and a
+    // filesystem path through node_modules all carry an `@` on the real wire.
+    expect("npm i @scope/pkg").not.toMatch(EMAIL_ADDRESS_PATTERN);
+    expect("user@host").not.toMatch(EMAIL_ADDRESS_PATTERN);
+    expect("@traycer/protocol").not.toMatch(EMAIL_ADDRESS_PATTERN);
+    expect("/Users/alex/node_modules/@babel/core").not.toMatch(
+      EMAIL_ADDRESS_PATTERN,
+    );
+    expect("build @ 2026-08-14").not.toMatch(EMAIL_ADDRESS_PATTERN);
+  });
+
+  it("does not match either redaction sentinel", () => {
+    expect(EMAIL_REDACTION_SENTINEL).not.toMatch(EMAIL_ADDRESS_PATTERN);
+    expect(REDACTION_SENTINEL).not.toMatch(EMAIL_ADDRESS_PATTERN);
+  });
+
+  it("is stateless across calls (no `g` flag lastIndex carry-over)", () => {
+    expect(EMAIL_ADDRESS_PATTERN.test("someone@example.com")).toBe(true);
+    expect(EMAIL_ADDRESS_PATTERN.test("someone@example.com")).toBe(true);
+  });
+});
+
+describe("redactEmailAddresses", () => {
+  it("replaces the address and nothing else", () => {
+    expect(redactEmailAddresses("ask someone@example.com about it")).toBe(
+      "ask <redacted-email> about it",
+    );
+  });
+
+  it("replaces every address in a string, not just the first", () => {
+    expect(redactEmailAddresses("a@x.com and b@y.org")).toBe(
+      "<redacted-email> and <redacted-email>",
+    );
+  });
+
+  it("leaves strings without an address untouched", () => {
+    expect(redactEmailAddresses("npm i @scope/pkg")).toBe("npm i @scope/pkg");
+  });
+
+  it("is idempotent", () => {
+    const once = redactEmailAddresses("mail someone@example.com");
+    expect(redactEmailAddresses(once)).toBe(once);
+  });
+});
+
+// The email guard is the fixture gate's PII half. It is value-based, so it
+// checks every string it walks regardless of key name — the operator's address
+// showed up under `email`, `createdBy` and deeper still in a real capture, and
+// a key-name list would have missed the ones it did not enumerate.
+describe("assertNoResidualEmails", () => {
+  it("throws on a raw address under a plain key", () => {
+    expect(emailGuard({ email: "someone@example.com" })).toThrow(
+      /unredacted email address at email/,
+    );
+    expect(emailGuard({ createdBy: "someone@example.com" })).toThrow(
+      /unredacted email address at createdBy/,
+    );
+  });
+
+  it("never echoes the address it found", () => {
+    // The failure text lands in CI logs, so it must not reprint the exact PII
+    // this guard exists to keep out of the repository.
+    expect(emailGuard({ email: "someone@example.com" })).toThrow(
+      /value withheld/,
+    );
+    expect(emailGuard({ email: "someone@example.com" })).not.toThrow(
+      /someone@example\.com/,
+    );
+  });
+
+  it("throws on an address embedded in a longer string", () => {
+    expect(
+      emailGuard({ note: "owner is someone@example.com, ping them" }),
+    ).toThrow(/unredacted email address at note/);
+  });
+
+  it("throws on an address inside an array", () => {
+    expect(emailGuard({ members: ["ok", "someone@example.com"] })).toThrow(
+      /unredacted email address at members\[1\]/,
+    );
+  });
+
+  it("throws on an address nested several levels under non-secret keys", () => {
+    expect(
+      emailGuard({
+        result: { profile: { contact: { primary: "someone@example.com" } } },
+      }),
+    ).toThrow(/unredacted email address at result\.profile\.contact\.primary/);
+  });
+
+  it("throws on an address used as an object key", () => {
+    // The scrubber rewrites values, not key names, so a keyed-by-address map
+    // is a fail-closed stop: the gate blocks the commit and a human decides.
+    expect(
+      emailGuard({ seats: { "someone@example.com": { role: "admin" } } }),
+    ).toThrow(/unredacted email address in key at seats/);
+  });
+
+  it("passes once the address is the sentinel", () => {
+    expect(
+      emailGuard({
+        email: EMAIL_REDACTION_SENTINEL,
+        note: `owner is ${EMAIL_REDACTION_SENTINEL}`,
+        members: [EMAIL_REDACTION_SENTINEL],
+      }),
+    ).not.toThrow();
+  });
+
+  // The gate's real contract: whatever the scrubber emits, the guard accepts.
+  // Asserting both directions on one payload is what makes this a gate rather
+  // than two rules that happen to be spelled similarly.
+  it("rejects the raw payload and accepts the scrubber's output for it", () => {
+    const payload = {
+      email: "someone@example.com",
+      note: "ping someone@example.com about /Users/alex/inbox",
+      nested: { list: ["a@b.io"] },
+      token: "jwt-for-someone@example.com",
+    };
+    expect(emailGuard(payload)).toThrow(/unredacted email address/);
+
+    const scrubbed = scrubbedPayload(payload);
+    expect(emailGuard(scrubbed)).not.toThrow();
+    expect(guard(scrubbed)).not.toThrow();
+    expect(JSON.stringify(scrubbed)).not.toContain("someone@example.com");
+    expect(JSON.stringify(scrubbed)).not.toContain("a@b.io");
+  });
+
+  it("passes on clean non-address `@` values and non-strings", () => {
+    expect(
+      emailGuard({
+        cmd: "npm i @scope/pkg",
+        host: "user@host",
+        count: 3,
+        ok: true,
+        nothing: null,
+      }),
+    ).not.toThrow();
   });
 });

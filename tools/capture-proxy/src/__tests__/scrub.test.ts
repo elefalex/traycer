@@ -296,3 +296,141 @@ describe("scrubFrame", () => {
     expect(tokens[1]).toBe("<redacted-token>");
   });
 });
+
+// Email redaction is VALUE-based: it fires on the shape of the string, not on
+// the key it sits under. A live capture put the operator's address under
+// `email`, under `createdBy`, and deeper still inside free text — a key-name
+// list would have missed whichever fields it failed to enumerate.
+describe("scrubFrame email redaction", () => {
+  function payloadOf(
+    payload: unknown,
+    homeDir: string,
+  ): Record<string, unknown> {
+    return scrubFrame({ ...base, payload }, homeDir).payload as Record<
+      string,
+      unknown
+    >;
+  }
+
+  it("redacts a value under an email key", () => {
+    const scrubbed = payloadOf({ email: "someone@example.com" }, "/Users/alex");
+    expect(scrubbed.email).toBe("<redacted-email>");
+    expect(JSON.stringify(scrubbed)).not.toContain("someone@example.com");
+  });
+
+  it("redacts under any key name, not a list of known ones", () => {
+    const scrubbed = payloadOf(
+      { createdBy: "someone@example.com", owner: "someone@example.com" },
+      "/Users/alex",
+    );
+    expect(scrubbed.createdBy).toBe("<redacted-email>");
+    expect(scrubbed.owner).toBe("<redacted-email>");
+  });
+
+  it("replaces only the address inside a longer string", () => {
+    const scrubbed = payloadOf(
+      { note: "task created by someone@example.com on Tuesday" },
+      "/Users/alex",
+    );
+    expect(scrubbed.note).toBe("task created by <redacted-email> on Tuesday");
+  });
+
+  it("redacts every address in a string carrying more than one", () => {
+    const scrubbed = payloadOf(
+      { note: "from a@x.com to b@y.org" },
+      "/Users/alex",
+    );
+    expect(scrubbed.note).toBe("from <redacted-email> to <redacted-email>");
+  });
+
+  it("redacts addresses inside arrays", () => {
+    const scrubbed = payloadOf(
+      { members: ["someone@example.com", "other@example.org", "plain"] },
+      "/Users/alex",
+    );
+    expect(scrubbed.members).toEqual([
+      "<redacted-email>",
+      "<redacted-email>",
+      "plain",
+    ]);
+  });
+
+  it("redacts an address nested several levels under non-secret keys", () => {
+    const scrubbed = payloadOf(
+      {
+        result: {
+          tasks: [{ meta: { author: { contact: "someone@example.com" } } }],
+        },
+      },
+      "/Users/alex",
+    );
+    expect(JSON.stringify(scrubbed)).not.toContain("someone@example.com");
+    expect(JSON.stringify(scrubbed)).toContain("<redacted-email>");
+  });
+
+  it("emits only the token sentinel for a secret-key string containing an address", () => {
+    // Credential redaction wins outright: a half-redacted token
+    // (`"<redacted-email>.<signature>"`) would leak the parts either rule
+    // failed to cover.
+    const scrubbed = payloadOf(
+      { token: "jwt-for-someone@example.com-issued" },
+      "/Users/alex",
+    );
+    expect(scrubbed.token).toBe("<redacted-token>");
+    expect(scrubbed.token).not.toContain("<redacted-email>");
+    expect(JSON.stringify(scrubbed)).not.toContain("someone@example.com");
+  });
+
+  it("emits only the token sentinel for array elements under a secret key", () => {
+    const scrubbed = payloadOf(
+      { apiKey: ["sk-someone@example.com", "sk-plain"] },
+      "/Users/alex",
+    );
+    expect(scrubbed.apiKey).toEqual(["<redacted-token>", "<redacted-token>"]);
+    expect(JSON.stringify(scrubbed)).not.toContain("someone@example.com");
+  });
+
+  it("leaves non-address `@` strings untouched", () => {
+    const payload = {
+      cmd: "npm i @scope/pkg",
+      host: "user@host",
+      pkg: "@traycer/protocol",
+      when: "build @ 2026-08-14",
+    };
+    expect(payloadOf(payload, "/Users/alex")).toEqual(payload);
+  });
+
+  it("applies home-dir substitution and email redaction to the same string", () => {
+    const scrubbed = payloadOf(
+      { log: "/Users/alex/inbox owned by someone@example.com" },
+      "/Users/alex",
+    );
+    expect(scrubbed.log).toBe("<home>/inbox owned by <redacted-email>");
+  });
+
+  it("redacts addresses when no home dir is configured", () => {
+    const scrubbed = payloadOf({ email: "someone@example.com" }, "");
+    expect(scrubbed.email).toBe("<redacted-email>");
+  });
+
+  it("scrubRecording strips addresses end to end", async () => {
+    const inPath = join(tmpdir(), `scrub-email-input-${Date.now()}.jsonl`);
+    const outPath = join(tmpdir(), `scrub-email-output-${Date.now()}.jsonl`);
+    const frame: RecordedFrame = {
+      ...base,
+      payload: {
+        email: "someone@example.com",
+        createdBy: "someone@example.com",
+        nested: { note: "ping someone@example.com", list: ["a@b.io"] },
+      },
+    };
+
+    await writeFile(inPath, `${JSON.stringify(frame)}\n`, "utf8");
+    await scrubRecording({ inPath, outPath, homeDir: "/Users/alex" });
+
+    const outContent = await readFile(outPath, "utf8");
+    expect(outContent).not.toContain("someone@example.com");
+    expect(outContent).not.toContain("a@b.io");
+    expect(outContent).toContain("<redacted-email>");
+  });
+});
