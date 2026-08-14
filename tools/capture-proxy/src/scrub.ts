@@ -1,9 +1,16 @@
 import { readFile, writeFile } from "node:fs/promises";
 import type { RecordedFrame } from "./recorder";
+import { isSecretKey, REDACTION_SENTINEL } from "./secret-rule";
 
+// Traversal deliberately mirrors `assertNoResidualSecrets` in ./secret-rule:
+// a string under a secret key is redacted, an array under a secret key is
+// judged element-by-element (so `keyName` is threaded through), and an
+// object is descended into with each child judged by its own key — which is
+// what lets the structured non-secrets (`token: { vars }`, `apiKey:
+// { supported, ... }`) through untouched.
 function scrubValue(value: unknown, keyName: string, homeDir: string): unknown {
   if (typeof value === "string") {
-    if (keyName.toLowerCase() === "token") return "<redacted-token>";
+    if (isSecretKey(keyName)) return REDACTION_SENTINEL;
     return homeDir.length > 0 ? value.split(homeDir).join("<home>") : value;
   }
   if (Array.isArray(value)) {
