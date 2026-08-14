@@ -76,25 +76,51 @@ describe("readRealMetadata", () => {
 });
 
 describe("formatSessionSummary", () => {
-  it("reports the recorded count, the dropped count and the output path", () => {
+  it("reports how many frames were written to the recording, and the output path", () => {
     expect(
       formatSessionSummary({
-        stats: { recorded: 128, dropped: 3 },
+        stats: { recorded: 128, truncatedConnections: 0 },
         outPath: "recordings/boot.jsonl",
       }),
     ).toBe(
-      "capture-proxy stopped: 128 frame(s) recorded, 3 dropped -> recordings/boot.jsonl",
+      "capture-proxy stopped: 128 frame(s) written to recordings/boot.jsonl",
     );
   });
 
   it("still names the output path when nothing was recorded", () => {
     expect(
       formatSessionSummary({
-        stats: { recorded: 0, dropped: 0 },
+        stats: { recorded: 0, truncatedConnections: 0 },
         outPath: "recordings/empty.jsonl",
       }),
     ).toBe(
-      "capture-proxy stopped: 0 frame(s) recorded, 0 dropped -> recordings/empty.jsonl",
+      "capture-proxy stopped: 0 frame(s) written to recordings/empty.jsonl",
     );
+  });
+
+  // The signal the operator actually needs: an upstream host socket that went
+  // away while the app was still connected means the tail of that session was
+  // never captured, and the recording is not a complete session.
+  it("warns that the capture may be truncated when upstream was lost mid-session", () => {
+    const summary = formatSessionSummary({
+      stats: { recorded: 128, truncatedConnections: 2 },
+      outPath: "recordings/boot.jsonl",
+    });
+
+    expect(summary).toContain(
+      "capture-proxy stopped: 128 frame(s) written to recordings/boot.jsonl",
+    );
+    expect(summary).toMatch(/WARNING/);
+    expect(summary).toMatch(/2 connection\(s\)/);
+    expect(summary).toMatch(/truncated/);
+  });
+
+  it("says nothing about truncation when every connection outlived its upstream", () => {
+    expect(
+      formatSessionSummary({
+        stats: { recorded: 12, truncatedConnections: 0 },
+        outPath: "recordings/warm.jsonl",
+      }),
+    ).not.toMatch(/WARNING/);
   });
 });

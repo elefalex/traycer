@@ -49,18 +49,31 @@ export async function readRealMetadata(pidFile: string): Promise<RealMetadata> {
 }
 
 /**
- * One line the operator sees on Ctrl-C. Without it an empty or half-empty
- * recording is only discoverable by opening the file, and the silent drop
- * path (frames the upstream socket could not accept) leaves no trace in the
- * summary at all.
+ * What the operator sees on Ctrl-C. Without it an empty or half-empty
+ * recording is only discoverable by opening the file.
+ *
+ * The count is deliberately worded as frames WRITTEN, not frames forwarded:
+ * the proxy records a client frame before handing it to a socket that may
+ * already be gone, so the recording's size is not evidence that the host
+ * received any of it.
+ *
+ * The truncation warning is the one completeness claim that can be made
+ * honestly, because losing an upstream socket under a live client leg is an
+ * event the proxy observes directly.
  */
 export function formatSessionSummary(input: {
   readonly stats: ProxyStats;
   readonly outPath: string;
 }): string {
+  const summary = `capture-proxy stopped: ${input.stats.recorded} frame(s) written to ${input.outPath}`;
+  if (input.stats.truncatedConnections === 0) {
+    return summary;
+  }
   return (
-    `capture-proxy stopped: ${input.stats.recorded} frame(s) recorded, ` +
-    `${input.stats.dropped} dropped -> ${input.outPath}`
+    `${summary}\n` +
+    `WARNING: ${input.stats.truncatedConnections} connection(s) lost the upstream host while the app was ` +
+    `still connected - this capture is truncated and must not be trusted as a complete session. Restart ` +
+    `the host and redo the run.`
   );
 }
 

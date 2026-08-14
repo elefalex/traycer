@@ -3,14 +3,21 @@ import { classifyFrame } from "./frame-classifier";
 import type { Recorder } from "./recorder";
 
 /**
- * Counters behind the end-of-session summary. `recorded` counts frames that
- * actually reached the recording file (an append that rejected is not one);
- * `dropped` counts client frames the upstream socket could not accept, which
- * are deliberately neither forwarded nor recorded.
+ * Counters behind the end-of-session summary.
+ *
+ * `recorded` counts frames that actually reached the recording file (an
+ * append that rejected is not one). It says nothing about delivery: a frame
+ * handed to `.send()` on a socket that has already gone away upstream is
+ * recorded but silently not delivered, and this proxy cannot tell the
+ * difference without redesigning the send path.
+ *
+ * `truncatedConnections` counts connections whose upstream host socket closed
+ * while the client leg was still open. Each one means the tail of that
+ * session was never seen, so the recording is not a complete session.
  */
 export type ProxyStats = {
   readonly recorded: number;
-  readonly dropped: number;
+  readonly truncatedConnections: number;
 };
 
 export type ProxyServer = {
@@ -36,7 +43,7 @@ export async function startProxyServer(input: {
   port: number;
 }): Promise<ProxyServer> {
   let recordedCount = 0;
-  let droppedCount = 0;
+  let truncatedConnections = 0;
   const record = (
     connId: string,
     leg: Leg,
@@ -118,8 +125,29 @@ export async function startProxyServer(input: {
           record(state.connId, state.leg, "h2c", raw);
           ws.send(raw);
         };
-        state.upstream.onclose = () => ws.close();
-        state.upstream.onerror = () => ws.close();
+        // An upstream failure fires onerror and then onclose; this connection
+        // is one truncated capture either way, not two.
+        let countedTruncation = false;
+        const onUpstreamGone = (): void => {
+          // Upstream closing while the client leg is still open means the
+          // host went away under a live app (crash, update, restart): from
+          // here on nothing more of that session can be captured, so the
+          // recording holds only its beginning. The ordinary teardown is the
+          // other order — the app disconnects, then `close()` below tears
+          // the upstream socket down — and by then this socket is no longer
+          // OPEN, so it is not counted.
+          if (!countedTruncation && ws.readyState === WebSocket.OPEN) {
+            countedTruncation = true;
+            truncatedConnections += 1;
+            console.error(
+              `[capture-proxy] upstream closed while the client was still connected ` +
+                `connId=${state.connId} leg=${state.leg}: the capture of this connection is truncated`,
+            );
+          }
+          ws.close();
+        };
+        state.upstream.onclose = onUpstreamGone;
+        state.upstream.onerror = onUpstreamGone;
       },
       message(ws: ServerWebSocket<ConnState>, msg) {
         const state = ws.data;
@@ -139,8 +167,11 @@ export async function startProxyServer(input: {
           // Upstream is gone or going away: sending would silently drop
           // the frame. Recording it as forwarded here would misrepresent
           // a dropped frame as delivered, so it is neither recorded nor
-          // buffered.
-          droppedCount += 1;
+          // buffered. Logged per occurrence rather than counted for the
+          // summary: this branch sees only the drops it can prove, while a
+          // frame sent into a socket whose close it has not yet observed is
+          // dropped just as silently and never reaches here, so a total
+          // printed at shutdown would read as an all-clear it cannot back.
           console.error(
             `[capture-proxy] dropping c2h frame for connId=${state.connId} leg=${state.leg}: upstream readyState=${readyState}`,
           );
@@ -167,7 +198,7 @@ export async function startProxyServer(input: {
 
   return {
     port,
-    stats: () => ({ recorded: recordedCount, dropped: droppedCount }),
+    stats: () => ({ recorded: recordedCount, truncatedConnections }),
     stop: async () => {
       server.stop(true);
     },

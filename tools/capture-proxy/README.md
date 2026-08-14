@@ -28,8 +28,11 @@ real signed host, to produce replay fixtures for the open host.
    a mid-session reconnect and misses everything the app does only on first
    launch, which is precisely the call order this milestone is capturing.
 4. Let the relaunched app reach the idle window, then Ctrl-C the proxy. It
-   prints how many frames it recorded and dropped — a suspiciously small
-   count means the app never came through the proxy, so redo the run.
+   prints how many frames it wrote to the recording — a suspiciously small
+   count means the app never came through the proxy, so redo the run. It also
+   prints a WARNING if any connection lost the upstream host while the app was
+   still connected: that capture is truncated (the host restarted or crashed
+   mid-run) and should be redone rather than committed.
    - If the app connects straight back to the real host instead of the
      proxy, it did not observe the pid.json swap: macOS FSEvents coalesces
      and can drop the create event for a rename-replace (documented at
