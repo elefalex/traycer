@@ -1,21 +1,23 @@
-import { existsSync, readdirSync } from "node:fs";
+import { mkdtemp, mkdir, rm, writeFile } from "node:fs/promises";
 import { readFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { describe, expect, it } from "vitest";
+import { afterEach, beforeEach, describe, expect, it } from "vitest";
+import { listJsonlFilesRecursively } from "./fixture-files";
 import {
   assertNoResidualSecrets,
   UNREDACTED_SECRET_JSON_PATTERN,
 } from "../secret-rule";
 
 const fixturesDir = join(__dirname, "..", "..", "fixtures");
-const fixtureFiles = existsSync(fixturesDir)
-  ? readdirSync(fixturesDir).filter((name) => name.endsWith(".jsonl"))
-  : [];
+const fixtureFiles = listJsonlFilesRecursively(fixturesDir);
 
 describe("committed fixtures", () => {
   // Self-skips (rather than fails) until the manual runbook has produced at
-  // least one fixture. Every `.jsonl` fixture found is guarded, not a single
-  // hardcoded filename, since the runbook produces more than one recording.
+  // least one fixture. Every `.jsonl` fixture found anywhere under
+  // `fixtures/` is guarded — not a single hardcoded filename, and not only
+  // the top level, since the runbook produces more than one recording and
+  // they may be filed into subdirectories.
   //
   // The walk is imported from `../secret-rule` rather than reimplemented
   // here: the scrubber applies the same module's rule, so the gate cannot
@@ -24,7 +26,7 @@ describe("committed fixtures", () => {
     "contains no residual credentials",
     async () => {
       for (const fixtureFile of fixtureFiles) {
-        const text = await readFile(join(fixturesDir, fixtureFile), "utf8");
+        const text = await readFile(fixtureFile, "utf8");
         for (const line of text.trim().split("\n")) {
           const frame: unknown = JSON.parse(line);
           // Cheap independent check on the serialized form, covering the
@@ -41,4 +43,38 @@ describe("committed fixtures", () => {
       }
     },
   );
+});
+
+describe("listJsonlFilesRecursively", () => {
+  let dir: string;
+  beforeEach(async () => {
+    dir = await mkdtemp(join(tmpdir(), "cap-fixtures-"));
+  });
+  afterEach(async () => {
+    await rm(dir, { recursive: true, force: true });
+  });
+
+  it("finds a .jsonl nested in a subdirectory, not just the top level", async () => {
+    await mkdir(join(dir, "boot", "run-2"), { recursive: true });
+    await writeFile(join(dir, "top.jsonl"), "{}\n", "utf8");
+    await writeFile(join(dir, "boot", "run-2", "deep.jsonl"), "{}\n", "utf8");
+
+    expect(listJsonlFilesRecursively(dir)).toEqual([
+      join(dir, "boot", "run-2", "deep.jsonl"),
+      join(dir, "top.jsonl"),
+    ]);
+  });
+
+  it("ignores non-.jsonl files at every level", async () => {
+    await mkdir(join(dir, "notes"), { recursive: true });
+    await writeFile(join(dir, ".gitkeep"), "", "utf8");
+    await writeFile(join(dir, "notes", "README.md"), "hi", "utf8");
+    await writeFile(join(dir, "notes", "raw.json"), "{}", "utf8");
+
+    expect(listJsonlFilesRecursively(dir)).toEqual([]);
+  });
+
+  it("returns nothing for a directory that does not exist", () => {
+    expect(listJsonlFilesRecursively(join(dir, "absent"))).toEqual([]);
+  });
 });
