@@ -49,7 +49,14 @@ export async function startProxyServer(input: {
     hostname: "127.0.0.1",
     fetch(req, srv) {
       const url = new URL(req.url);
-      if (url.pathname === "/activity") return new Response("ok");
+      if (url.pathname === "/activity") {
+        // The client probe (clients/shared/host-client/host-activity-probe.ts)
+        // parses this body as JSON and reads a boolean `busy`; anything else
+        // fail-safes to busy. Answer busy for real: a host being captured is
+        // in use, and nothing should conclude it is idle and tear it down
+        // mid-recording.
+        return Response.json({ busy: true });
+      }
       if (url.pathname !== "/rpc" && url.pathname !== "/stream") {
         return new Response("not found", { status: 404 });
       }

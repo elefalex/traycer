@@ -99,7 +99,11 @@ describe("startProxyServer", () => {
     expect(kinds).toContain("response");
   });
 
-  it("returns 200 ok for GET /activity", async () => {
+  // The probe in clients/shared/host-client/host-activity-probe.ts calls
+  // response.json() and requires a boolean `busy`; a body it cannot parse
+  // is swallowed and fail-safes to busy. A proxy in use must say busy on
+  // purpose, not by accident of a malformed body.
+  it("answers GET /activity with a JSON {busy:true} body", async () => {
     proxy = await startProxyServer({
       upstreamRpcUrl: "ws://127.0.0.1:1/rpc",
       upstreamStreamUrl: "ws://127.0.0.1:1/stream",
@@ -109,6 +113,8 @@ describe("startProxyServer", () => {
 
     const res = await fetch(`http://127.0.0.1:${proxy.port}/activity`);
     expect(res.status).toBe(200);
+    expect(res.headers.get("content-type")).toMatch(/application\/json/);
+    expect(await res.json()).toEqual({ busy: true });
   });
 
   it("returns 404 for an unknown path and does not crash the server", async () => {
