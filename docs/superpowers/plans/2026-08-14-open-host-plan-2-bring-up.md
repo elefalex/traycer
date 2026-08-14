@@ -62,7 +62,7 @@ The point is that `main.ts` restores `pid.json` on signal-driven exit. Do not im
 
 `tools/capture-proxy/src/__tests__/main-subprocess.test.ts`:
 ```ts
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -102,11 +102,21 @@ describe("main.ts as a subprocess", () => {
       { stdout: "pipe", stderr: "pipe" },
     );
 
-    await waitForRewrite(pidPath, original, 5_000);
-    child.kill("SIGTERM");
-    await child.exited;
+    // The child MUST be reaped on every path. `waitForRewrite` throws on a
+    // slow box or on the very regression this test exists to catch, and
+    // `child.exited` is unbounded if main.ts hangs on SIGTERM — either way the
+    // test would fail while leaking a live process holding an open port and a
+    // live pid.json. Vitest does not reap processes spawned via `Bun.spawn`.
+    try {
+      await waitForRewrite(pidPath, original, 5_000);
+      child.kill("SIGTERM");
+      await child.exited;
 
-    expect(await readFile(pidPath, "utf8")).toBe(original);
+      expect(await readFile(pidPath, "utf8")).toBe(original);
+    } finally {
+      child.kill("SIGKILL");
+      await rm(dir, { recursive: true, force: true });
+    }
   }, 20_000);
 });
 ```
