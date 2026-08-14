@@ -189,6 +189,44 @@ describe("swapPidFile", () => {
     expect(errors.join("\n")).toMatch(/rewritten by another process/);
   });
 
+  // Same behaviour (do not resurrect stale pre-capture metadata), different
+  // cause: nobody rewrote pid.json, it is simply gone — the host shut down and
+  // removed it. Reporting that as a rewrite sends the operator looking for a
+  // process that never existed.
+  it("says pid.json is gone, not rewritten, when it is absent at restore time", async () => {
+    const pidPath = join(dir, "pid.json");
+    await writeFile(pidPath, '{"original":true}', "utf8");
+    const next = buildProxyPidMetadata({
+      realMetadata: { hostId: "h1", version: "9.9.9" },
+      proxyPort: 51234,
+      pid: 4242,
+      nowIso: "2026-08-14T00:00:00.000Z",
+    });
+    const { restore } = await swapPidFile(pidPath, next);
+
+    // The host exits and cleans up after itself.
+    await rm(pidPath);
+
+    const errors: string[] = [];
+    const spy = vi
+      .spyOn(console, "error")
+      .mockImplementation((...args: unknown[]) => {
+        errors.push(args.map((arg) => String(arg)).join(" "));
+      });
+    try {
+      await restore();
+    } finally {
+      spy.mockRestore();
+    }
+
+    const joined = errors.join("\n");
+    expect(joined).toMatch(/no longer exists/);
+    expect(joined).not.toMatch(/rewritten by another process/);
+    // The pre-capture bytes must not be resurrected over a host that
+    // deliberately removed the file.
+    expect(existsSync(pidPath)).toBe(false);
+  });
+
   it("does not delete a pid.json another process wrote when there was no original", async () => {
     const pidPath = join(dir, "pid.json");
     const next = buildProxyPidMetadata({

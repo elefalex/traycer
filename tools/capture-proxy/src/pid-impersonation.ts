@@ -116,6 +116,21 @@ export async function swapPidFile(
           throw error;
         }
       }
+      if (current === null) {
+        // Nobody rewrote it: pid.json is simply gone, because the host shut
+        // down and cleaned up after itself. Same outcome as a foreign
+        // rewrite (the pre-capture bytes are not resurrected — writing them
+        // back would advertise a host that is no longer running), but saying
+        // "rewritten by another process" here sends the operator hunting for
+        // a process that never touched it.
+        console.error(
+          `[capture-proxy] pid.json at ${pidPath} no longer exists ` +
+            `(the host likely shut down mid-capture) - leaving it absent rather than ` +
+            `recreating it from stale pre-capture metadata`,
+        );
+        restored = true;
+        return;
+      }
       if (current !== proxyBytes) {
         console.error(
           `[capture-proxy] pid.json at ${pidPath} was rewritten by another process ` +
