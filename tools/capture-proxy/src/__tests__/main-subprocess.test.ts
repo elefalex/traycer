@@ -1,4 +1,4 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
@@ -38,10 +38,15 @@ describe("main.ts as a subprocess", () => {
       { stdout: "pipe", stderr: "pipe" },
     );
 
-    await waitForRewrite(pidPath, original, 5_000);
-    child.kill("SIGTERM");
-    await child.exited;
+    try {
+      await waitForRewrite(pidPath, original, 5_000);
+      child.kill("SIGTERM");
+      await child.exited;
 
-    expect(await readFile(pidPath, "utf8")).toBe(original);
+      expect(await readFile(pidPath, "utf8")).toBe(original);
+    } finally {
+      child.kill("SIGKILL");
+      await rm(dir, { recursive: true, force: true });
+    }
   }, 20_000);
 });
