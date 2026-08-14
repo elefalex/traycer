@@ -15,17 +15,39 @@ export type RecordedFrame = {
 
 export class Recorder {
   private stream: WriteStream | null = null;
+  private initPromise: Promise<WriteStream> | null = null;
+  private streamError: Error | null = null;
 
   constructor(private readonly filePath: string) {}
 
+  private async init(): Promise<WriteStream> {
+    if (this.initPromise === null) {
+      this.initPromise = this.createStream();
+    }
+    return this.initPromise;
+  }
+
+  private async createStream(): Promise<WriteStream> {
+    await mkdir(dirname(this.filePath), { recursive: true });
+    const stream = createWriteStream(this.filePath, { flags: "a" });
+    stream.on("error", (err) => {
+      this.streamError = err;
+    });
+    this.stream = stream;
+    return stream;
+  }
+
   async append(frame: RecordedFrame): Promise<void> {
-    if (this.stream === null) {
-      await mkdir(dirname(this.filePath), { recursive: true });
-      this.stream = createWriteStream(this.filePath, { flags: "a" });
+    if (this.streamError !== null) {
+      throw this.streamError;
+    }
+    const stream = await this.init();
+    if (this.streamError !== null) {
+      throw this.streamError;
     }
     const line = `${JSON.stringify(frame)}\n`;
     await new Promise<void>((resolve, reject) => {
-      this.stream?.write(line, (err) => (err ? reject(err) : resolve()));
+      stream.write(line, (err) => (err ? reject(err) : resolve()));
     });
   }
 
@@ -33,6 +55,7 @@ export class Recorder {
     const stream = this.stream;
     if (stream === null) return;
     this.stream = null;
+    this.initPromise = null;
     await new Promise<void>((resolve) => stream.end(resolve));
   }
 }

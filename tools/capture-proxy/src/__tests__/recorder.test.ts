@@ -39,4 +39,38 @@ describe("Recorder", () => {
     expect(JSON.parse(lines[0]).ts).toBe(1);
     expect(JSON.parse(lines[1]).kind).toBe("response");
   });
+
+  it("handles concurrent appends without awaiting between them", async () => {
+    const file = join(dir, "rec.jsonl");
+    const recorder = new Recorder(file);
+    await Promise.all([
+      recorder.append(frame({ ts: 1, connId: "c1" })),
+      recorder.append(frame({ ts: 2, connId: "c2" })),
+      recorder.append(frame({ ts: 3, connId: "c3" })),
+    ]);
+    await recorder.close();
+
+    const lines = (await readFile(file, "utf8")).trim().split("\n");
+    expect(lines).toHaveLength(3);
+    // Verify all lines are valid JSON
+    const parsed = lines.map((line) => JSON.parse(line));
+    expect(parsed).toHaveLength(3);
+    // Verify all frames are present (connIds should be c1, c2, c3 in some order)
+    const connIds = parsed.map((p) => p.connId).sort();
+    expect(connIds).toEqual(["c1", "c2", "c3"]);
+  });
+
+  it("close() with zero appends resolves without creating a stream", async () => {
+    const file = join(dir, "rec.jsonl");
+    const recorder = new Recorder(file);
+    await recorder.close();
+
+    // File should not exist since we never appended
+    try {
+      await readFile(file, "utf8");
+      expect.fail("File should not exist");
+    } catch (err) {
+      expect((err as NodeJS.ErrnoException).code).toBe("ENOENT");
+    }
+  });
 });
