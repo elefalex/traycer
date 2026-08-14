@@ -159,6 +159,12 @@ describe("classifyFrame", () => {
     expect(valid).toBe(false);
     expect(frame.kind).toBe("unknown");
     expect(frame.method).toBe("host.status");
+    expect(frame.payload).toEqual({
+      requestId: "r1",
+      method: "host.status",
+      schemaVersion: { major: 1, minor: 0 },
+      params: {},
+    });
   });
 
   it("handles object with non-string kind", () => {
@@ -179,6 +185,13 @@ describe("classifyFrame", () => {
     expect(valid).toBe(false);
     expect(frame.kind).toBe("unknown");
     expect(frame.method).toBe("host.status");
+    expect(frame.payload).toEqual({
+      kind: 123,
+      requestId: "r1",
+      method: "host.status",
+      schemaVersion: { major: 1, minor: 0 },
+      params: {},
+    });
   });
 
   it("handles missing schemaVersion", () => {
@@ -199,6 +212,12 @@ describe("classifyFrame", () => {
     expect(frame.kind).toBe("request");
     expect(frame.method).toBe("host.status");
     expect(frame.schemaVersion).toBeNull();
+    expect(frame.payload).toEqual({
+      kind: "request",
+      requestId: "r1",
+      method: "host.status",
+      params: {},
+    });
   });
 
   it("handles partial schemaVersion (missing minor)", () => {
@@ -218,6 +237,13 @@ describe("classifyFrame", () => {
     });
     expect(valid).toBe(false);
     expect(frame.schemaVersion).toBeNull();
+    expect(frame.payload).toEqual({
+      kind: "request",
+      requestId: "r1",
+      method: "host.status",
+      schemaVersion: { major: 1 },
+      params: {},
+    });
   });
 
   it("handles schemaVersion with non-numeric fields", () => {
@@ -237,6 +263,13 @@ describe("classifyFrame", () => {
     });
     expect(valid).toBe(false);
     expect(frame.schemaVersion).toBeNull();
+    expect(frame.payload).toEqual({
+      kind: "request",
+      requestId: "r1",
+      method: "host.status",
+      schemaVersion: { major: "1", minor: 0 },
+      params: {},
+    });
   });
 
   it("handles missing method field", () => {
@@ -257,6 +290,12 @@ describe("classifyFrame", () => {
     expect(frame.kind).toBe("request");
     expect(frame.method).toBeNull();
     expect(frame.schemaVersion).toEqual({ major: 1, minor: 0 });
+    expect(frame.payload).toEqual({
+      kind: "request",
+      requestId: "r1",
+      schemaVersion: { major: 1, minor: 0 },
+      params: {},
+    });
   });
 
   it("handles method field that is not a string", () => {
@@ -278,5 +317,12 @@ describe("classifyFrame", () => {
     expect(frame.kind).toBe("request");
     expect(frame.method).toBeNull();
     expect(frame.schemaVersion).toEqual({ major: 1, minor: 0 });
+    expect(frame.payload).toEqual({
+      kind: "request",
+      requestId: "r1",
+      method: 123,
+      schemaVersion: { major: 1, minor: 0 },
+      params: {},
+    });
   });
 });
