@@ -427,7 +427,8 @@ git commit -s -m "add atomic json store for the open host"
   ```
 
 **Schema citations required in this task's code comments:**
-- The `pid.json` field set comes from `HostPidMetadata` in `clients/shared/host-lifecycle/shared/host-process.ts:16-29`, and the decoder's required-field check is at `:105-108` (`hostId`, `websocketUrl`, `startedAt` must be strings).
+- The `pid.json` field set comes from `HostPidMetadata` in `clients/shared/host-lifecycle/shared/host-process.ts:16-30`, and the decoder's required-field check is at `:103-109` — which requires **five** fields, not three: `pid` (number), `version` (string), plus `hostId`/`websocketUrl`/`startedAt` (strings).
+- `HostPidMetadata` also carries `processStartTimeMs: number | null` (`:22-23`). Omitting it is safe — the type's own doc comment at `:8-15` states that records written by shipped versions lack it and that absence is `null`, "never a decode failure". Do not fabricate a value.
 - `processStartIdentity` may be `null` (`:29`, and the decoder tolerates a non-matching value at `:128-129`). Plan 1 established empirically that an absent or invalid `processStartIdentity` fails **open** — the client does not reject the host for it. Write `null` and do not fabricate one.
 
 - [ ] **Step 1: Write the failing tests**
