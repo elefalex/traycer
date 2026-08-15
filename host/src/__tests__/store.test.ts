@@ -1,9 +1,16 @@
-import { mkdtemp, readdir, readFile } from "node:fs/promises";
+import { chmod, mkdtemp, readdir, readFile, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { readJson, resolveDataDir, writeJson } from "../store/store";
+
+// Permission-denied reads report EACCES only when the effective user is not
+// root; root bypasses filesystem permission checks entirely, which would
+// make the "propagates a non-ENOENT failure" test below flaky in a
+// root-run container. Skip it there rather than assert something the OS
+// won't actually enforce.
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 function asRecord(raw: unknown): { readonly v: number } {
   if (typeof raw !== "object" || raw === null || !("v" in raw)) {
@@ -36,10 +43,38 @@ describe("store", () => {
     expect(await readJson({ dataDir }, "nope.json", asRecord)).toBeNull();
   });
 
+  (isRoot ? it.skip : it)(
+    "propagates a non-ENOENT read failure instead of returning null",
+    async () => {
+      const dataDir = await mkdtemp(join(tmpdir(), "open-host-store-"));
+      const target = join(dataDir, "locked.json");
+      await writeFile(target, JSON.stringify({ v: 1 }), "utf8");
+      await chmod(target, 0o000);
+      try {
+        await expect(
+          readJson({ dataDir }, "locked.json", asRecord),
+        ).rejects.toThrow();
+      } finally {
+        await chmod(target, 0o644);
+      }
+    },
+  );
+
   it("leaves no temp file behind after a write", async () => {
     const dataDir = await mkdtemp(join(tmpdir(), "open-host-store-"));
     await writeJson({ dataDir }, "thing.json", { v: 1 });
     expect(await readdir(dataDir)).toEqual(["thing.json"]);
+  });
+
+  it("settles both writers on a concurrent write to the same key, landing on one whole value", async () => {
+    const dataDir = await mkdtemp(join(tmpdir(), "open-host-store-"));
+    const results = await Promise.allSettled([
+      writeJson({ dataDir }, "thing.json", { v: 1 }),
+      writeJson({ dataDir }, "thing.json", { v: 2 }),
+    ]);
+    expect(results.map((r) => r.status)).toEqual(["fulfilled", "fulfilled"]);
+    const text = await readFile(join(dataDir, "thing.json"), "utf8");
+    expect([JSON.stringify({ v: 1 }), JSON.stringify({ v: 2 })]).toContain(text);
   });
 
   it("does not corrupt an existing file when the new value fails to serialize", async () => {
