@@ -17,6 +17,27 @@ summary: Build the open host's bootstrap, JSON WebSocket server, handshake, disp
 
 **Tech Stack:** Bun 1.3.12 workspaces, Nx, TypeScript, vitest, zod (via `@traycer/protocol`), Electron desktop client (unmodified except one flag-gated auth patch).
 
+## Execution order (revised after Task 5)
+
+Tasks are **numbered by dependency, not executed in numeric order.** The original
+numbering builds all 19 domain methods before anything ever talks to the real
+client, which puts first contact ten tasks after the handshake lands — so a wrong
+handshake would surface as a mysterious non-render, very late and very expensive.
+The revised order reaches first contact in four tasks:
+
+| Order | Tasks | Why here |
+|---|---|---|
+| 1 | 1 → 7 | Foundation through the dispatcher. Sequential; each depends on the last. |
+| 2 | **13** (replay) | Runs with **no Electron**. Feeds the real recorded client frames through the dispatcher and checks the answers — the cheapest possible validation of handshake + dispatcher against genuine traffic. |
+| 3 | **12 ∥ 14 ∥ 15** | Disjoint trees: stream leg (`host/src/stream/`), auth patch (`clients/`), dev target (`Makefile`). Safe to run in parallel once Task 7 has landed. |
+| 4 | **16** (operator) | The actual answer to "does the app render?" |
+| 5 | 8 → 11 | Domain tiers, prioritised by Task 16's **measured** unimplemented-method log rather than by guesswork. |
+
+**The first Task 16 run is expected to render with missing or empty data.** That
+is the design working: an unimplemented method returns a well-formed error, and
+the GUI degrades per-method because the handshake is negotiated. A method only
+earns real implementation once a live run shows it blocking something.
+
 ## What the Plan 1 capture established
 
 Every number below is measured from `tools/capture-proxy/fixtures/`, not assumed. Tasks cite these instead of re-deriving them.
