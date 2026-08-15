@@ -1,10 +1,17 @@
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
+import { chmod, mkdtemp, readFile, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { describe, expect, it } from "vitest";
 import { parseHostArgs } from "../bootstrap/args";
 import { loadOrCreateIdentity } from "../bootstrap/identity";
 import { removePidFile, writePidFile } from "../bootstrap/pid-file";
+
+// Permission-denied reads report EACCES only when the effective user is not
+// root; root bypasses filesystem permission checks entirely, which would
+// make the unreadable-identity test below flaky in a root-run container.
+// Skip it there rather than assert something the OS won't actually enforce
+// (mirrors the same guard in store.test.ts).
+const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
 
 describe("parseHostArgs", () => {
   it("returns all-null for no args", () => {
@@ -41,6 +48,31 @@ describe("identity", () => {
     expect(first.hostId).toMatch(/^[0-9a-f-]{36}$/);
     expect(second.hostId).toBe(first.hostId);
   });
+
+  (isRoot ? it.skip : it)(
+    "propagates rather than minting a new hostId when identity.json is unreadable",
+    async () => {
+      const dataDir = await mkdtemp(join(tmpdir(), "open-host-id-unreadable-"));
+      const target = join(dataDir, "identity.json");
+      // A directory-in-place-of-file (EISDIR) was considered and rejected:
+      // it would also break `writeJson`'s rename-over-target on the mint
+      // fallback path, so the test would reject regardless of whether
+      // `loadOrCreateIdentity` actually propagates the read error — a
+      // confound that makes it pass for the wrong reason either way.
+      // `chmod 000` instead denies read on a real file while leaving the
+      // containing directory writable, so a buggy broad catch-and-mint
+      // would still succeed at overwriting it (rename only needs directory
+      // write permission, not permission on the file being replaced) and
+      // the assertion below would then correctly fail.
+      await writeFile(target, JSON.stringify({ hostId: "existing" }), "utf8");
+      await chmod(target, 0o000);
+      try {
+        await expect(loadOrCreateIdentity({ dataDir })).rejects.toThrow();
+      } finally {
+        await chmod(target, 0o644);
+      }
+    },
+  );
 });
 
 describe("pid file", () => {
