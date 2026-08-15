@@ -71,7 +71,33 @@ describe("rpc handshake", () => {
     expect(outcome.frame.details.code).toBe("INCOMPATIBLE");
   });
 
+  it("never echoes the bearer token into a rejected open's response frame", () => {
+    const { manifest } = buildHostManifest();
+    const truncated = { ...manifest };
+    delete truncated["host.status"];
+    const secretToken = "live-cloud-credential-do-not-leak-9f3a7c";
+    const outcome = handleOpenFrame({
+      kind: "open",
+      token: secretToken,
+      manifest: truncated,
+      optionalManifest: {},
+    });
+    expect(outcome.kind).toBe("fatalError");
+    expect(JSON.stringify(outcome)).not.toContain(secretToken);
+  });
+
   it("rejects a structurally invalid open frame", () => {
     expect(handleOpenFrame({ kind: "open" }).kind).toBe("fatalError");
+  });
+
+  it("shapes a structurally invalid open frame's details as PROTOCOL_ERROR", () => {
+    const outcome = handleOpenFrame({ kind: "open" });
+    expect(outcome.kind).toBe("fatalError");
+    if (outcome.kind !== "fatalError") throw new Error("unreachable");
+    expect(outcome.frame.details.code).toBe("PROTOCOL_ERROR");
+    expect(typeof outcome.frame.details.reason).toBe("string");
+    expect(outcome.frame.details.reason.length).toBeGreaterThan(0);
+    expect(outcome.frame.details.incompatibleMethods).toBeNull();
+    expect(outcome.frame.details.upgradeGuidance).toBeNull();
   });
 });

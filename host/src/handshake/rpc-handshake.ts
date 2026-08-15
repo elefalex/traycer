@@ -23,8 +23,18 @@ export type HandshakeOutcome =
 /**
  * Built from the SAME registry + floor constant the client uses
  * (`clients/shared/host-transport/ws-rpc-client.ts:429-430`), so the required
- * manifests are name-identical and version-identical by construction. A
- * hand-maintained list here could only ever drift out of compatibility.
+ * manifests are name-identical by construction (a hand-maintained list here
+ * could only ever drift out of that identity), and this identity is
+ * additionally frozen in CI by `protocol/src/host/RELEASE-INVARIANT.md`'s
+ * name-set-stability test.
+ *
+ * This does NOT make the manifests version-identical: two peers built from
+ * different protocol revisions legitimately advertise different canonical
+ * versions per method (the fixture used in this task's tests proves it — 14
+ * methods differ from the recorded v1.1.11 host, e.g. `host.status` 1.0 vs
+ * this repo's 1.1). Cross-revision safety instead comes from `check()`
+ * walking each side's `canBridgeFromMySide` (compatibility-checker.ts:104+),
+ * not from the shared manifest-building call.
  *
  * `optionalManifest` is deliberately empty: the compatibility check compares
  * required manifests only (`ws-rpc-client.ts:360-365`), and a method the host
@@ -42,6 +52,26 @@ export function buildHostManifest(): SplitConnectionManifest {
 }
 
 /**
+ * Cap on the parse-failure `reason` string placed on the wire. Zod's
+ * `.message` on a `safeParse` failure lists every issue, and its size is
+ * proportional to the malformed input — an unauthenticated peer can submit
+ * an arbitrarily large `manifest` object and inflate it (a fed 400-entry
+ * malformed manifest produced a 157,004-character message in review). Zod
+ * v4 issues never carry the received value (only `expected`/`code`/`path`/
+ * `message`), so truncating loses no secret — only extra issue detail.
+ */
+const MAX_PARSE_FAILURE_REASON_LENGTH = 2000;
+
+function buildParseFailureReason(message: string): string {
+  if (message.length <= MAX_PARSE_FAILURE_REASON_LENGTH) {
+    return `Malformed open frame: ${message}`;
+  }
+  const omitted = message.length - MAX_PARSE_FAILURE_REASON_LENGTH;
+  const head = message.slice(0, MAX_PARSE_FAILURE_REASON_LENGTH);
+  return `Malformed open frame: ${head}… [truncated, ${omitted} more characters omitted]`;
+}
+
+/**
  * Handles the client's first frame on `/rpc`
  * (`clientOpenFrameSchema` — protocol/src/framework/ws-protocol.ts:232).
  *
@@ -54,7 +84,9 @@ export function buildHostManifest(): SplitConnectionManifest {
  *   client sent something structurally invalid.
  * - The frame parses, but `check()` (compatibility-checker.ts:42, run with
  *   `selfRole: "host"`) finds a method in the union of the two manifests that
- *   one side lacks or that neither side can bridge.
+ *   one side lacks, or that this host's registry cannot bridge — `check()`
+ *   is one-sided, so it never asks whether the client's registry could have
+ *   bridged the other way (compatibility-checker.ts:104+).
  *
  * A parsed, compatible frame produces `openAck`
  * (`hostOpenAckFrameSchema` — ws-protocol.ts:266) carrying exactly
@@ -70,7 +102,7 @@ export function handleOpenFrame(raw: unknown): HandshakeOutcome {
         kind: "fatalError",
         details: {
           code: "PROTOCOL_ERROR",
-          reason: `Malformed open frame: ${parsed.error.message}`,
+          reason: buildParseFailureReason(parsed.error.message),
           incompatibleMethods: null,
           upgradeGuidance: null,
         },
